@@ -130,7 +130,12 @@ ARCHITECTURE_RULES = (
     TestRule("tests/architecture/test_event_declaration_guard.py", ("src/chrys/foundation/events/**",)),
     TestRule(
         "tests/architecture/test_entrypoint_bootstrap.py",
-        ("src/chrys/app/cli/**", "src/chrys/app/installer.py", "src/chrys/app/tui/app.py"),
+        (
+            "src/chrys/app/cli/**",
+            "src/chrys/app/installer.py",
+            "src/chrys/app/tui/app.py",
+            "src/chrys/app/memory_hosts/**",
+        ),
     ),
     TestRule("tests/architecture/test_env_hermeticity.py"),
     TestRule("tests/architecture/test_hygiene_exchange_walker_shapes.py"),
@@ -208,6 +213,22 @@ _LLM_CLIENT_SOURCES = (
 REGULAR_RULES = (
     TestRule("tests/service/mcp/test_cache_e2e.py", ("tests/service/mcp/mcp_cache_probe_server.py",)),
     TestRule("tests/orchestration/engine/build/test_initialization.py", ("tests/support/mcp_reload_probe_server.py",)),
+    # Both standalone memory hosts are started by module name in real-process
+    # tests; their imports and transcript fixtures are invisible to the graph.
+    TestRule(
+        "tests/app/memory_hosts",
+        ("src/chrys/app/memory_hosts/**", "src/chrys/service/memory/**", "tests/app/memory_hosts/**"),
+    ),
+    # The concurrent change-log writers execute this worker by file path.
+    TestRule(
+        "tests/service/memory/storage/test_file_change_log.py",
+        (
+            "src/chrys/service/memory/change_log.py",
+            "src/chrys/service/memory/storage/file_change_log.py",
+            "src/chrys/service/memory/storage/layout.py",
+            "tests/service/memory/storage/change_log_worker.py",
+        ),
+    ),
     TestRule("tests/app/tui/behaviors/test_startup_imports.py", ("src/chrys/**",)),
     TestRule("tests/service/approval/test_formal_core.py", ("src/chrys/service/approval/principles.json",)),
     TestRule("tests/app/tui/screens/test_approval_review_reason.py", ("src/chrys/service/approval/principles.json",)),

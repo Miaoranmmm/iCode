@@ -1153,6 +1153,8 @@ def test_runtime_asset_without_a_subsystem_scope_reports_the_gap() -> None:
         ("AGENTS.md", "tests/architecture/test_chrys_test.py"),
         ("README.md", "tests/architecture/test_chrys_test.py"),
         ("src/chrys/app/tui/app.py", "tests/architecture/test_entrypoint_bootstrap.py"),
+        ("src/chrys/app/memory_hosts/mcp_server.py", "tests/architecture/test_entrypoint_bootstrap.py"),
+        ("src/chrys/app/memory_hosts/claude_code/hook.py", "tests/architecture/test_entrypoint_bootstrap.py"),
         ("src/chrys/app/cli/run.py", "tests/architecture/test_tui_structure.py"),
         ("src/chrys/app/cli/run.py", "tests/architecture/test_hygiene_lazy_imports.py"),
         (
@@ -1218,6 +1220,61 @@ def test_regular_filesystem_scanners_watch_their_complete_scope(
 
     # The target exists here, so a source mirror could also pick it: the watch must be why.
     assert f"regular filesystem watch matched {changed_path}" in selection.regular.get(expected_target, set())
+
+
+@pytest.mark.parametrize(
+    "changed_path",
+    [
+        "src/chrys/app/memory_hosts/mcp_server.py",
+        "src/chrys/app/memory_hosts/claude_code/hook.py",
+        "src/chrys/app/memory_hosts/extract.py",
+        "src/chrys/app/memory_hosts/extraction_selection.py",
+        "src/chrys/app/memory_hosts/executor_icode.py",
+        "src/chrys/service/memory/extraction.py",
+        "src/chrys/service/memory/storage/file_store.py",
+        "tests/app/memory_hosts/fixtures/transcript.jsonl",
+    ],
+)
+def test_memory_host_subprocess_and_fixture_dependencies_have_an_explicit_watch(
+    tmp_path: Path, changed_path: str
+) -> None:
+    _write(tmp_path, "tests/app/memory_hosts/test_mcp_process.py", "def test_boundary(): pass\n")
+    selection = chrys_test.select_smart_tests(
+        (chrys_test.Change(changed_path, frozenset({"changed"})),),
+        chrys_test.ImportGraph({}, {}, {}, ()),
+        root=tmp_path,
+    )
+    assert f"regular filesystem watch matched {changed_path}" in selection.regular["tests/app/memory_hosts"]
+
+
+@pytest.mark.parametrize(
+    "changed_path",
+    [
+        "src/chrys/service/memory/change_log.py",
+        "src/chrys/service/memory/storage/file_change_log.py",
+        "src/chrys/service/memory/storage/layout.py",
+        "tests/service/memory/storage/change_log_worker.py",
+    ],
+)
+def test_file_change_log_subprocess_dependencies_have_an_explicit_watch(tmp_path: Path, changed_path: str) -> None:
+    target = "tests/service/memory/storage/test_file_change_log.py"
+    _write(tmp_path, target, "def test_boundary(): pass\n")
+    selection = chrys_test.select_smart_tests(
+        (chrys_test.Change(changed_path, frozenset({"changed"})),),
+        chrys_test.ImportGraph({}, {}, {}, ()),
+        root=tmp_path,
+    )
+    assert f"regular filesystem watch matched {changed_path}" in selection.regular.get(target, set())
+
+
+def test_only_change_log_worker_edit_selects_the_real_storage_test_without_import_edges() -> None:
+    worker = "tests/service/memory/storage/change_log_worker.py"
+    target = "tests/service/memory/storage/test_file_change_log.py"
+    selection = chrys_test.select_smart_tests(
+        (chrys_test.Change(worker, frozenset({"changed"})),),
+        chrys_test.ImportGraph({}, {}, {}, ()),
+    )
+    assert f"regular filesystem watch matched {worker}" in selection.regular.get(target, set())
 
 
 def test_target_output_caps_reasons_without_discarding_selection_evidence(

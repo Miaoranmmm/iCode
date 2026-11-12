@@ -1,0 +1,9 @@
+{
+  "generator": "Round-A reader -> build_batches -> freeze_regression_set, before Round B edits",
+  "instructions_sha256": "e912afa6fe730c82b7b60a7e24e768175284157251e0121806f9608e2e47018a",
+  "tool_schemas_sha256": "dada7446f6f5fd5581d291030ae3cc483a820f2569371c56fa192d7e3c7f3859",
+  "prompt_sha256": [
+    "07d08512ff2692ddf4e75e3e30ddbf3f95582196f924c8880fd9daf6c3901649",
+    "181129068a7d64d75236e9d1f28df878ab53e28bcf5975e3b2fbd8df3b07e6d6"
+  ]
+}

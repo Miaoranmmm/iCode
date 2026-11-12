@@ -1,0 +1,8 @@
+{"type":"user","uuid":"parent-words","parentUuid":null,"sessionId":"parent-session","origin":{"kind":"human"},"timestamp":"2026-11-06T10:00:00+08:00","message":{"content":"Prefer plain words."}}
+{"type":"assistant","uuid":"parent-call","parentUuid":"parent-words","sessionId":"parent-session","message":{"content":[{"type":"tool_use","id":"copied-call","name":"memory_save","input":{}}]}}
+{"type":"system","subtype":"stop_hook_summary","uuid":"parent-meta","parentUuid":"parent-call","sessionId":"parent-session"}
+{"type":"user","uuid":"child-words","parentUuid":"parent-meta","sessionId":"child-session","turnOrigin":"human","message":{"content":[{"type":"text","text":"Keep examples small."}]}}
+{"type":"assistant","uuid":"parallel-a","parentUuid":"child-words","sessionId":"child-session","message":{"id":"shared-message","content":[{"type":"tool_use","id":"first-call","name":"memory_read","input":{}}]}}
+{"type":"assistant","uuid":"parallel-b","parentUuid":"parallel-a","sessionId":"child-session","message":{"id":"shared-message","content":[{"type":"tool_use","id":"second-call","name":"memory_save","input":{}}]}}
+{"type":"user","uuid":"first-result","parentUuid":"parallel-a","sessionId":"child-session","message":{"content":[{"type":"tool_result","tool_use_id":"first-call","content":"Invented result"}]}}
+{"type":"user","uuid":"second-result","parentUuid":"parallel-b","sessionId":"child-session","message":{"content":[{"type":"tool_result","tool_use_id":"second-call","content":"Invented result"}]}}

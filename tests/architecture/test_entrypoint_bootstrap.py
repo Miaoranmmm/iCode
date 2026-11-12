@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Standalone guard: every CLI-dispatched runtime module bootstraps the runtime or is explicitly exempt."""
+"""Every CLI-dispatched or standalone runtime entrypoint uses the shared bootstrap."""
 
 from __future__ import annotations
 
@@ -16,6 +16,20 @@ from tests.support.ci import CI_LINUX_ONLY
 pytestmark = CI_LINUX_ONLY
 
 _AGENTS_BOOTSTRAP_SECTION = 'AGENTS.md "Architecture & control flow" section'
+
+# These hosts run through ``python -m`` rather than the iCode CLI dispatcher.
+# Keep their source paths explicit so dropping either bootstrap remains visible.
+_STANDALONE_ENTRYPOINT_PATHS = frozenset(
+    {
+        Path("src/chrys/app/memory_hosts/mcp_server.py"),
+        Path("src/chrys/app/memory_hosts/claude_code/hook.py"),
+        Path("src/chrys/app/memory_hosts/extract.py"),
+        Path("src/chrys/app/memory_hosts/extraction_selection.py"),
+        Path("src/chrys/app/memory_hosts/tuning.py"),
+        Path("src/chrys/app/memory_hosts/metrics.py"),
+        Path("src/chrys/app/memory_hosts/extraction_compare.py"),
+    }
+)
 
 _ENTRYPOINT_BOOTSTRAP_EXEMPT = {
     Path("src/chrys/app/cli/serve.py"): "spawns the TUI child, which performs bootstrap_runtime itself",
@@ -174,7 +188,7 @@ def test_shared_headless_bootstrap_requires_the_live_preparation_edge(
 
 
 def test_entrypoint_bootstrap_completeness_and_exemptions_are_live() -> None:
-    """Every CLI-dispatched runtime module must bootstrap or remain explicitly exempt."""
+    """Every runtime module must bootstrap or remain explicitly exempt."""
     sources = _src_sources()
     dispatcher_path = Path("src/chrys/app/cli/app.py")
     dispatcher_source = sources.get(dispatcher_path)
@@ -201,11 +215,11 @@ def test_entrypoint_bootstrap_completeness_and_exemptions_are_live() -> None:
                 'believed."). Fix: remove the stale exemption or restore the real dispatch edge'
             )
 
-    for path in sorted(dispatched_paths):
+    for path in sorted(dispatched_paths | _STANDALONE_ENTRYPOINT_PATHS):
         source = sources.get(path)
         if source is None:
             problems.append(
-                f"{path}:1: app.py::main dispatches to a module with no source file; violates "
+                f"{path}:1: a runtime entrypoint has no source file; violates "
                 f"{_AGENTS_BOOTSTRAP_SECTION} (every entrypoint calls bootstrap_runtime). Fix: restore the "
                 "dispatched module or correct the dispatcher import"
             )
@@ -223,3 +237,22 @@ def test_entrypoint_bootstrap_completeness_and_exemptions_are_live() -> None:
 
     _tree.cache_clear()
     assert problems == [], "\n".join(problems)
+
+
+@pytest.mark.parametrize("entrypoint", sorted(_STANDALONE_ENTRYPOINT_PATHS), ids=lambda path: path.stem)
+@pytest.mark.parametrize("failure", ["missing_bootstrap", "missing_module"])
+def test_standalone_entrypoint_guard_rejects_missing_bootstrap_or_source(
+    monkeypatch: pytest.MonkeyPatch, entrypoint: Path, failure: str
+) -> None:
+    """Exercise the real sweep with the standalone edge broken, including under xdist."""
+    sources = _src_sources()
+    if failure == "missing_module":
+        del sources[entrypoint]
+        expected = "a runtime entrypoint has no source file"
+    else:
+        sources[entrypoint] = sources[entrypoint].replace("bootstrap_runtime(", "removed_bootstrap(")
+        expected = r"entrypoint-bootstrap-completeness found no bootstrap_runtime\(\) call"
+    monkeypatch.setattr("tests.architecture.test_entrypoint_bootstrap._src_sources", lambda: sources)
+    with pytest.raises(AssertionError, match=expected) as error:
+        test_entrypoint_bootstrap_completeness_and_exemptions_are_live()
+    assert entrypoint.as_posix() in str(error.value)

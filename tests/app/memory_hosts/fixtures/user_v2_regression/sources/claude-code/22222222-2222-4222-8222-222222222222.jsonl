@@ -1,0 +1,1 @@
+{"type": "user", "uuid": "other-user", "parentUuid": null, "sessionId": "22222222-2222-4222-8222-222222222222", "entrypoint": "claude-desktop", "origin": {"kind": "human"}, "timestamp": "2026-11-01T10:00:00+08:00", "message": {"role": "user", "content": "Use clear public names."}, "cwd": "/synthetic/trial-project"}
