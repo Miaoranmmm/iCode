@@ -4967,6 +4967,118 @@
         ["wrapper", "await run_spill_finalizer(_truncate_mcp_list_result, result, texts, budget, spill_dir)", "unresolved", "chrys.service.tools.spill.run_spill_finalizer"]
       ]
     },
+    "chrys.service.memory.extraction": {
+      "ProjectRunLock.release": [
+        ["thread_pool", "await asyncio.to_thread(self._lock.release)", "unresolved"]
+      ],
+      "ProjectRunLock.try_acquire": [
+        ["thread_pool", "await asyncio.to_thread(self._acquire)", "unresolved"]
+      ],
+      "WatermarkStore.limited": [
+        ["thread_pool", "await asyncio.to_thread(self._finalize, ticket, reason)", "unresolved"]
+      ],
+      "WatermarkStore.load": [
+        ["thread_pool", "await asyncio.to_thread(self._read)", "unresolved"]
+      ],
+      "WatermarkStore.prepare": [
+        ["thread_pool", "await asyncio.to_thread(self._prepare, project.project_id, tuple(sources))", "unresolved"]
+      ],
+      "WatermarkStore.succeed": [
+        ["thread_pool", "await asyncio.to_thread(self._finalize, ticket, None)", "unresolved"]
+      ]
+    },
+    "chrys.service.memory.operations": {
+      "MemoryReader.catalog": [
+        ["awaitable", "await self._store.catalog(self._project)", "unresolved"],
+        ["awaitable", "await self._store.catalog(GLOBAL_SCOPE)", "unresolved"]
+      ],
+      "MemoryReader.read": [
+        ["queue", "await self._store.get(scope, ref)", "unresolved"],
+        ["thread_pool", "await asyncio.to_thread(check_basis, stored.entry.evidence, self._project, self._project_root)", "unresolved"]
+      ],
+      "MemoryReader.search": [
+        ["awaitable", "await self._store.search(target, query, cursor, with_global=True)", "unresolved"],
+        ["awaitable", "await self._store.search(_require_project(self._project), query, cursor)", "unresolved"],
+        ["awaitable", "await self._store.search(GLOBAL_SCOPE, query, cursor)", "unresolved"]
+      ],
+      "MemoryWriter._append_change": [
+        ["awaitable", "await self._change_log.append(change)", "unresolved"]
+      ],
+      "MemoryWriter._draft": [
+        ["wrapper", "await verify_evidence(request.evidence, view, stored=old_evidence, project=self._project, project_root=self._project_root, view_first=restoring, occurrences=occurrences)", "unresolved", "chrys.service.memory.verification.verify_evidence"]
+      ],
+      "MemoryWriter.forget": [
+        ["queue", "await self._store.get(scope, ref)", "unresolved"],
+        ["awaitable", "await self._store.delete(scope, ref, version)", "unresolved"],
+        ["wrapper", "await self._append_change(scope, ref, current.entry.type, 'delete', self._written_by, version, None)", "unresolved", "chrys.service.memory.operations.MemoryWriter._append_change"]
+      ],
+      "MemoryWriter.merge": [
+        ["queue", "await self._store.get(scope, keep_ref)", "unresolved"],
+        ["queue", "await self._store.get(scope, drop_ref)", "unresolved"],
+        ["awaitable", "await self._store.merge(scope, keep_ref, keep_version, drop_ref, drop_version, draft)", "unresolved"],
+        ["wrapper", "await self._append_change(scope, keep_ref, draft.type, 'merge', self._written_by, keep_version, result.version)", "unresolved", "chrys.service.memory.operations.MemoryWriter._append_change"],
+        ["wrapper", "await self._append_change(scope, drop_ref, drop.entry.type, 'delete', self._written_by, drop_version, None)", "unresolved", "chrys.service.memory.operations.MemoryWriter._append_change"]
+      ],
+      "MemoryWriter.save": [
+        ["wrapper", "await self._draft(request, view)", "unresolved", "chrys.service.memory.operations.MemoryWriter._draft"],
+        ["awaitable", "await self._store.create(scope, draft)", "unresolved"],
+        ["wrapper", "await self._append_change(scope, result.ref, draft.type, 'create', self._written_by, None, result.version)", "unresolved", "chrys.service.memory.operations.MemoryWriter._append_change"],
+        ["queue", "await self._store.get(scope, request.ref)", "unresolved"],
+        ["wrapper", "await self._draft(request, view, current=entry.draft(), title_only=title_only, restoring=restoring, occurrences=occurrences)", "unresolved", "chrys.service.memory.operations.MemoryWriter._draft"],
+        ["awaitable", "await self._store.update(scope, request.ref, version, draft)", "unresolved"],
+        ["wrapper", "await self._append_change(scope, request.ref, draft.type, 'restore' if restoring else 'update', self._written_by, version, updated_version)", "unresolved", "chrys.service.memory.operations.MemoryWriter._append_change"]
+      ],
+      "MemoryWriter.withdraw": [
+        ["queue", "await self._store.get(scope, ref)", "unresolved"],
+        ["awaitable", "await self._store.update(scope, ref, version, draft)", "unresolved"],
+        ["wrapper", "await self._append_change(scope, ref, draft.type, 'withdraw', self._written_by, version, updated_version)", "unresolved", "chrys.service.memory.operations.MemoryWriter._append_change"]
+      ]
+    },
+    "chrys.service.memory.storage.file_change_log": {
+      "FileChangeLog.append": [
+        ["thread_pool", "await asyncio.to_thread(self._append, change)", "unresolved"]
+      ]
+    },
+    "chrys.service.memory.storage.file_store": {
+      "FileMemoryStore.catalog": [
+        ["wrapper", "await self.list_entries(scope)", "unresolved", "chrys.service.memory.storage.file_store.FileMemoryStore.list_entries"]
+      ],
+      "FileMemoryStore.create": [
+        ["wrapper", "await _run(lambda: self._create(scope, draft))", "unresolved", "chrys.service.memory.storage.file_store._run"]
+      ],
+      "FileMemoryStore.delete": [
+        ["wrapper", "await _run(lambda: self._delete(scope, name, ref, version))", "unresolved", "chrys.service.memory.storage.file_store._run"]
+      ],
+      "FileMemoryStore.get": [
+        ["wrapper", "await _run(lambda: _read_stored(self._scope_dir(scope) / f'{name}{_ENTRY_SUFFIX}', scope.scope, ref))", "unresolved", "chrys.service.memory.storage.file_store._run"]
+      ],
+      "FileMemoryStore.list_entries": [
+        ["wrapper", "await _run(lambda: _scan(self._scope_dir(scope), scope.scope))", "unresolved", "chrys.service.memory.storage.file_store._run"]
+      ],
+      "FileMemoryStore.list_projects": [
+        ["wrapper", "await _run(self._list_projects)", "unresolved", "chrys.service.memory.storage.file_store._run"]
+      ],
+      "FileMemoryStore.merge": [
+        ["wrapper", "await _run(lambda: self._merge(scope, keep_name, keep_ref, keep_version, drop_name, drop_ref, drop_version, keep_draft))", "unresolved", "chrys.service.memory.storage.file_store._run"]
+      ],
+      "FileMemoryStore.search": [
+        ["wrapper", "await _run(scan_all)", "unresolved", "chrys.service.memory.storage.file_store._run"]
+      ],
+      "FileMemoryStore.unreadable": [
+        ["wrapper", "await _run(lambda: _scan(self._scope_dir(scope), scope.scope))", "unresolved", "chrys.service.memory.storage.file_store._run"]
+      ],
+      "FileMemoryStore.update": [
+        ["wrapper", "await _run(lambda: self._update(scope, name, ref, version, draft))", "unresolved", "chrys.service.memory.storage.file_store._run"]
+      ],
+      "_run": [
+        ["thread_pool", "await asyncio.to_thread(work)", "unresolved"]
+      ]
+    },
+    "chrys.service.memory.verification": {
+      "verify_evidence": [
+        ["thread_pool", "await asyncio.to_thread(capture_file, project, project_root, evidence.path)", "unresolved"]
+      ]
+    },
     "chrys.service.mutations.git_state": {
       "_run_git_nul_stream": [
         ["subprocess", "proc.wait()", "unresolved"],

@@ -1,0 +1,9 @@
+{"type":"user","uuid":"paste","parentUuid":null,"sessionId":"fixture-session","origin":{"kind":"human"},"message":{"content":"Before<pasted_content id=\"fixture\">Pasted requirement</pasted_content id=\"fixture\">After"}}
+{"type":"user","uuid":"reply","parentUuid":"paste","sessionId":"fixture-session","origin":{"kind":"human"},"message":{"content":"<!-- reply 4 -->\n> Earlier model proposal\nUse shorter names."}}
+{"type":"user","uuid":"bash","parentUuid":"reply","sessionId":"fixture-session","origin":{"kind":"human"},"message":{"content":"<bash-input>cat fixture.txt</bash-input><bash-stdout>External words</bash-stdout><bash-stderr></bash-stderr>"}}
+{"type":"user","uuid":"artifact","parentUuid":"bash","sessionId":"fixture-session","turnOrigin":"human","message":{"content":[{"type":"text","text":"Agree before<artifact-view-context>{\"fixture\":\"foreign text\"}<artifact-content-authored-by-others/></artifact-view-context>Agree after"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":""}}]}}
+{"type":"user","uuid":"interrupted","parentUuid":"artifact","sessionId":"fixture-session","message":{"content":"[Request interrupted by user]"}}
+{"type":"user","uuid":"continued","parentUuid":"interrupted","sessionId":"fixture-session","isCompactSummary":true,"turnOrigin":"human","message":{"content":"This session is being continued from a previous conversation."}}
+{"type":"user","uuid":"continue","parentUuid":"continued","sessionId":"fixture-session","isMeta":true,"origin":{"kind":"human"},"message":{"content":"Continue from where you left off."}}
+{"type":"user","uuid":"typed","parentUuid":"continue","sessionId":"fixture-session","promptSource":"typed","origin":{"kind":"human"},"turnOrigin":"human","message":{"content":"Always explain the reason."}}
+{"type":"assistant","uuid":"call","parentUuid":"typed","sessionId":"fixture-session","message":{"content":[{"type":"tool_use","id":"fixture-call","name":"memory_save","input":{}}]}}

@@ -1,0 +1,1 @@
+{"run_id": "extract-00000000000000000000000000000000", "exit_code": 0, "status": "dry_run", "profile": {}, "diagnostics": [], "signals": {"candidate_sessions": 0, "annotated_sessions": 0, "annotations": {"user_interrupt": 0}, "signals_unavailable_sessions": 0}, "baseline_counts": {}, "batches": [], "not_started_batches": 0, "cancel_requested": false, "elapsed_seconds": 0}

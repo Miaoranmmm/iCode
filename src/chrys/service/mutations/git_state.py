@@ -164,6 +164,59 @@ def resolve_git_root(path: str, *, timeout: float = GIT_TIMEOUT_SECONDS) -> str 
     return canonical_path(value) if value else None
 
 
+@dataclass(frozen=True, slots=True)
+class GitLocation:
+    """Where a path sits in Git: its worktree root and the common directory its worktrees share, both canonical."""
+
+    root: str
+    common_dir: str
+
+
+def locate_git_repository(path: str, *, timeout: float = GIT_TIMEOUT_SECONDS) -> GitLocation | None:
+    """Return the worktree root and common directory of *path*, or ``None`` when *path* is in no repository.
+
+    Raises ``OSError`` when Git is missing, times out or fails for any other
+    reason, so a caller that keys data on the answer never mistakes a failed
+    query for "not a repository" (``resolve_git_root`` folds both into ``None``).
+    """
+    from chrys.foundation.platform.process import windows_hidden_subprocess_kwargs
+
+    executable = shutil.which("git")
+    if executable is None:
+        raise OSError("git is not installed")
+    # Git's messages are translated; the C locale keeps "not a git repository" matchable.
+    env = {**git_subprocess_env(), "LC_ALL": "C", "LANGUAGE": ""}
+    try:
+        result = subprocess.run(  # noqa: S603
+            [executable, "rev-parse", "--show-toplevel", "--git-common-dir"],
+            cwd=path,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+            **windows_hidden_subprocess_kwargs(),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise OSError("git rev-parse timed out") from exc
+    except OSError as exc:
+        # Keep the message free of the paths the original error names.
+        raise OSError("git could not be started") from exc
+    if result.returncode != 0:
+        # Only the search coming up empty says "(or any of the parent directories)" / "(or any parent up to
+        # mount point ...)"; a repository whose .git pointer or worktree record is broken says
+        # "not a git repository: <path>" and is a failure, not a plain directory.
+        if b"not a git repository (or any " in result.stderr:
+            return None
+        raise OSError(f"git rev-parse failed with exit code {result.returncode}")
+    lines = os.fsdecode(result.stdout).splitlines()
+    if len(lines) != 2 or not all(lines):
+        raise OSError("git rev-parse returned unexpected output")
+    toplevel, common_dir = lines
+    # --git-common-dir is relative to the directory Git ran in unless it is already absolute.
+    return GitLocation(root=canonical_path(toplevel), common_dir=canonical_path(os.path.join(path, common_dir)))
+
+
 def read_git_head(root: str, *, timeout: float = GIT_TIMEOUT_SECONDS) -> GitHeadState:
     """Read HEAD and its symbolic branch; unborn HEAD is represented by ``None``."""
     deadline = time.monotonic() + timeout

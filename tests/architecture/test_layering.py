@@ -411,6 +411,43 @@ def test_dynamic_subpackage_import_is_classified() -> None:
     assert not _is_violation(collector.edges[0])
 
 
+_MEMORY_CORE = SRC / "service" / "memory"
+
+
+def _memory_core_violations(path: Path, tree: ast.AST) -> list[str]:
+    return [
+        f"{path.relative_to(ROOT)}: the memory core must not import {target!r}"
+        for target in _import_targets_including_type_checking(path, tree)
+        if target == "chrys.kernel" or target.startswith("chrys.kernel.")
+    ]
+
+
+def test_memory_core_stays_agent_agnostic() -> None:
+    """Hosts adapt to the memory core, never the other way round.
+
+    The service tier may already not import orchestration or app; the memory
+    core also stays off the agent kernel, not even under TYPE_CHECKING.
+    """
+    sources = sorted(_MEMORY_CORE.rglob("*.py"))
+    assert sources, "service/memory holds the memory core"
+    violations = [problem for path in sources for problem in _memory_core_violations(path, _parse(path))]
+    assert violations == []
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "from chrys.kernel import FunctionTool",
+        "import chrys.kernel.middleware",
+        "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    from chrys.kernel import FunctionTool",
+        "def late():\n    from ...kernel import middleware",
+    ],
+)
+def test_memory_core_guard_rejects_kernel_imports(statement: str) -> None:
+    path = _MEMORY_CORE / "example.py"
+    assert _memory_core_violations(path, ast.parse(statement))
+
+
 def test_system_reminder_scoped_current_run_api_stays_service_owned_and_typed() -> None:
     """Scoped reminder tokens must stay service-owned and explicitly typed.
 

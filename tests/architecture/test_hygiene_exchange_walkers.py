@@ -36,6 +36,10 @@ pytestmark = CI_LINUX_ONLY
 
 
 _EXCHANGE_WALKER_ALLOWLIST = {
+    # External Codex rollout snapshots: this file scanner delegates proprietary
+    # task_started/provenance/call-output records to the host decoder, not kernel
+    # Messages or history markers. Kernel exchange grammar cannot parse them.
+    (Path("src/chrys/app/memory_hosts/codex_history.py"), "CodexHistoryReader._scan"),
     # Annotation-occurrence scanner: walks persisted group-annotation runs, not
     # exchanges; result classification only delimits occurrence ends.
     (Path("src/chrys/kernel/compaction.py"), "_partial_tool_call_groups"),

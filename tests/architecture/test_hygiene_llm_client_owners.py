@@ -21,6 +21,9 @@ from tests.architecture._hygiene_core import _meta_guard_problem, _pins_allowlis
 # construction and needs no entry.
 _LLM_CLIENT_OWNER_ALLOWLIST = {
     "src/chrys/service/llm/clients.py::scoped_client": "the context manager's own finally",
+    "src/chrys/app/memory_hosts/executor_icode.py::ICodeExecutor.run": (
+        "the batch OnceClose cleanup, draining complete operations before client.aclose"
+    ),
     "src/chrys/orchestration/engine/build/builder.py::build_agent._acquire": (
         "the build's PreparedAgent (prepared.own_or_release)"
     ),
