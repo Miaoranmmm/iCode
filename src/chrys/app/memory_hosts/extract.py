@@ -98,6 +98,7 @@ class ExtractionOptions:
     freeze_to: Path | None = None
     baseline_dir: Path | None = None
     tuning: str | None = None
+    batch_cap: int | None = None
 
 
 @dataclass(slots=True)
@@ -336,6 +337,10 @@ async def run_extraction(
         except ValueError as error:
             raise ExtractionError("invalid_tuning", "The requested memory tuning is unavailable or invalid.") from error
         _check_cancelled(owner)
+        if options.batch_cap is not None:
+            if options.replay is not None or options.batch_cap <= 0:
+                raise ExtractionError("invalid_limits", "Batch cap must be positive and excludes replay.")
+            tuning = replace(tuning, batch_cap=options.batch_cap)
         report.tuning_version = tuning.version
         if options.tuning is not None and not options.tuning.removeprefix("v").isdecimal():
             report.tuning_version = "file:" + text_digest(json.dumps(asdict(tuning), sort_keys=True))
@@ -369,6 +374,7 @@ async def run_extraction(
             "max_turns": max_turns,
             "max_output_tokens": effective_profile.max_output_tokens,
             "batch_timeout_seconds": timeout_seconds,
+            "batch_cap": tuning.batch_cap,
         }
         if max_turns <= 0 or not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
             raise ExtractionError("invalid_limits", "Turns and timeout must be positive.")
@@ -873,7 +879,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--max-turns", type=_positive)
     parser.add_argument("--max-output-tokens", type=_positive)
     parser.add_argument("--batch-timeout-seconds", type=_seconds)
+    parser.add_argument("--batch-cap", type=_positive)
+    parser.add_argument("--auto-extract-lock", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+    if args.batch_cap is not None and args.replay is not None:
+        parser.error("--batch-cap cannot be used with --replay")
     if args.freeze_to is not None and not args.dry_run:
         parser.error("--freeze-to requires --dry-run")
     if args.freeze_to is not None and args.replay is not None:
@@ -887,6 +897,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         runtime = bootstrap_runtime(project_root=args.C, apply_patches=False, setup_telemetry=False)
         settings: Settings = runtime.loaded.settings
+        if args.auto_extract_lock:
+            from chrys.app.memory_hosts.claude_code.auto_extract import run_locked
+
+            return run_locked(get_platform().config_dir / "memory", lambda: _execute(args, settings))
+        return _execute(args, settings)
+    except (ExtractionError, MemoryOperationError) as error:
+        sys.stderr.write(f"{error.kind}: Extraction preflight failed.\n")
+        return 1
+    except KeyboardInterrupt:
+        return 130
+    except Exception:
+        sys.stderr.write("Extraction could not start.\n")
+        return 1
+
+
+def _execute(args: argparse.Namespace, settings: Settings) -> int:
+    """Resolve the profile and run after the optional automatic-run lock is held."""
+    try:
         if settings.raw_http_capture:
             raise ExtractionError("raw_http_capture_enabled", "Disable raw model HTTP capture before extraction.")
         registry = ModelProfileRegistry()
@@ -909,6 +937,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.freeze_to,
             args.baseline_dir,
             args.tuning,
+            args.batch_cap,
         )
         report = asyncio.run(run_extraction(options, profile))
         sys.stdout.write(json.dumps(asdict(report), ensure_ascii=True) + "\n")

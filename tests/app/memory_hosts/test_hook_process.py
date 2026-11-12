@@ -5,10 +5,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,6 +20,7 @@ import pytest
 from chrys.app.memory_hosts.claude_code.registry import HostKey, Registry
 from chrys.foundation.platform import get_platform
 from chrys.foundation.platform.process import windows_hidden_subprocess_kwargs
+from chrys.foundation.util.lock import FileLock
 from chrys.service.memory.storage.file_store import FileMemoryStore
 from chrys.service.memory.storage.store import GLOBAL_SCOPE, MemoryEntryDraft, Quote
 from tests.support.secure_files import plant_owner_only_bytes
@@ -41,7 +44,15 @@ class Environment:
     root: Path
 
     def run(
-        self, payload: bytes, *, fixture_host: bool, no_host: bool = False, bootstrap_report: Path | None = None
+        self,
+        payload: bytes,
+        *,
+        fixture_host: bool,
+        no_host: bool = False,
+        bootstrap_report: Path | None = None,
+        auto_extract_profile: str | None = None,
+        child_report: Path | None = None,
+        extra_args: tuple[str, ...] = (),
     ) -> ChildResult:
         module = "tests.app.memory_hosts.hook_runner" if fixture_host else "chrys.app.memory_hosts.claude_code.hook"
         command = [sys.executable, "-m", module]
@@ -49,6 +60,11 @@ class Environment:
             command.append("--no-host")
         if bootstrap_report is not None:
             command.extend(("--bootstrap-failure", str(bootstrap_report)))
+        if auto_extract_profile is not None:
+            command.extend(("--auto-extract-profile", auto_extract_profile))
+        if child_report is not None:
+            command.extend(("--child-report", str(child_report)))
+        command.extend(extra_args)
         with subprocess.Popen(
             command,
             stdin=subprocess.PIPE,
@@ -136,6 +152,29 @@ def test_actual_hook_oversized_stdin_drains_to_eof(environment: Environment) -> 
     assert not (environment.root / "hosts").exists()
 
 
+@pytest.mark.parametrize(
+    "args",
+    [("--auto-extract-profle", "X"), ("--auto-extract-profile",), ("--auto-extract-profile=",), ("-h",)],
+    ids=["misspelled", "missing-value", "empty-value", "help"],
+)
+def test_bad_hook_arguments_never_block_the_prompt(environment: Environment, args: tuple[str, ...]) -> None:
+    # Exit 2 from UserPromptSubmit would block the user's prompt in Claude Code.
+    asyncio.run(
+        FileMemoryStore(environment.root).create(
+            GLOBAL_SCOPE,
+            MemoryEntryDraft(
+                "intent", "Use SQLite", "Use SQLite.", "model", quotes=(Quote("Use SQLite", "message", "earlier"),)
+            ),
+        )
+    )
+    result = environment.run(environment.payload("UserPromptSubmit"), fixture_host=True, extra_args=args)
+    assert result.returncode == 0
+    assert result.stdout.startswith("<memory_catalog>\n") and "Use SQLite" in result.stdout
+    assert result.stderr == "Memory hook arguments are invalid; automatic extraction is off.\n"
+    assert Registry(environment.root).read_registration(KEY) is not None
+    assert not (environment.root / "auto-extract").exists()
+
+
 def test_real_main_session_start_ups_stop_and_redelivery(environment: Environment) -> None:
     store = FileMemoryStore(environment.root)
     asyncio.run(
@@ -206,3 +245,38 @@ def test_real_main_drains_stdin_before_bootstrap_failure(environment: Environmen
     assert result == ChildResult(0, "", "Memory hook is unavailable; continuing without an update.\n")
     assert json.loads(report.read_text(encoding="utf-8")) == {"bytes_read": len(payload), "eof": True}
     assert not (environment.root / "hosts").exists()
+
+
+def test_real_auto_hook_exits_before_detached_extraction_and_child_is_reaped(environment: Environment) -> None:
+    root = environment.root / "auto-extract"
+    root.mkdir(parents=True, mode=0o700)
+    plant_owner_only_bytes(root / "run.lock", b"")
+    report = environment.workspace / "auto-child.pid"
+    child: psutil.Process | None = None
+    try:
+        with FileLock(root / "run.lock"):
+            started = time.monotonic()
+            result = environment.run(
+                environment.payload("UserPromptSubmit"),
+                fixture_host=True,
+                auto_extract_profile="missing-offline-profile",
+                child_report=report,
+            )
+            elapsed = time.monotonic() - started
+            assert result == ChildResult(0, "", "")
+            assert elapsed < ENGINE_TURN_TIMEOUT
+            child = psutil.Process(int(report.read_text(encoding="utf-8")))
+            assert child.is_running()
+            assert not next((root / "logs").glob("*.log")).read_bytes()
+        child.wait(timeout=ENGINE_TURN_TIMEOUT)
+        assert not child.is_running()
+        log = next((root / "logs").glob("*.log")).read_text(encoding="utf-8")
+        assert "model_profile_unavailable" in log
+        assert not (environment.root / "watermarks").exists()
+    finally:
+        if child is None and report.exists():
+            with contextlib.suppress(psutil.NoSuchProcess):
+                child = psutil.Process(int(report.read_text(encoding="utf-8")))
+        if child is not None and child.is_running():
+            child.kill()
+            child.wait(timeout=ENGINE_TURN_TIMEOUT)

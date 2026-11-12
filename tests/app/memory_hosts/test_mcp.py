@@ -322,7 +322,15 @@ def test_schemas_are_closed_and_instructions_match_claude_modes(store: FileMemor
         "context_session": ["context_quote"],
     }
     assert save["required"] == ["type", "title", "body"]
-    assert create_server(store, "read-write", Context()).instructions == CLAUDE_INSTRUCTIONS
+    assert (
+        create_server(store, "read-write", Context()).instructions
+        == CLAUDE_INSTRUCTIONS
+        == (
+            "The hook supplies the memory catalog. Call memory_catalog if you need a fresh listing, and memory_read "
+            "before relying on an entry. When the user asks you to remember something or states a lasting preference "
+            "or decision, save it with memory_save, quoting their exact words."
+        )
+    )
     assert create_server(store, "read-only", Context()).instructions == CLAUDE_READ_ONLY_INSTRUCTIONS
 
 

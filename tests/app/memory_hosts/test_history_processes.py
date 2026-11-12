@@ -4,16 +4,23 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+import psutil
 import pytest
 
+from chrys.app.memory_hosts.claude_code.history import ClaudeHistoryReader
 from chrys.app.memory_hosts.claude_code.holder import NativeClaudeHolder, proc_start_seconds
 from chrys.app.memory_hosts.codex_history import CodexProcessCheck, ProcessExecutable
-from tests.app.memory_hosts.history_fixtures import SESSION
+from chrys.foundation.platform import get_platform
+from chrys.service.memory.extraction import SessionKey
+from chrys.service.memory.project import bind_project
+from tests.app.memory_hosts.history_fixtures import SESSION, claude_user, write_jsonl
 from tests.support.secure_files import plant_owner_only_bytes
 
 START = int(datetime(2026, 11, 1, 2, 3, 4, tzinfo=UTC).timestamp())
@@ -146,3 +153,40 @@ def test_other_user_hosts_and_unrelated_executables_do_not_block() -> None:
 )
 def test_unknown_process_identity_or_enumeration_never_passes(table: Table) -> None:
     assert CodexProcessCheck(table).check() == "unknown"
+
+
+async def test_reader_checks_the_claude_directory_that_owns_the_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The automatic hook may run with HOME pointing at an isolated memory store,
+    # while the transcripts and their live-session registrations stay in Claude's directory.
+    home = tmp_path / "isolated-home"
+    home.mkdir()
+    for name in ("HOME", "USERPROFILE"):
+        monkeypatch.setenv(name, str(home))
+    claude = tmp_path / "claude-config"
+    source = claude / "projects" / "-workspace"
+    source.mkdir(parents=True)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    project = await asyncio.to_thread(bind_project, str(workspace))
+    write_jsonl(source / f"{SESSION}.jsonl", [claude_user("u", "Words", cwd=str(workspace))])
+    pid = os.getpid()
+    started = datetime.fromtimestamp(int(psutil.Process(pid).create_time()), UTC)
+    (claude / "sessions").mkdir()
+    plant_owner_only_bytes(
+        claude / "sessions" / f"{pid}.json",
+        json.dumps(
+            {
+                "sessionId": SESSION,
+                "pid": pid,
+                "procStart": f"{started:%a %b} {started.day} {started:%H:%M:%S %Y}",
+                "pidDomain": {"macos": "darwin", "linux": "linux", "windows": "win32"}[get_platform().os_name],
+            }
+        ).encode("utf-8"),
+    )
+    result = await ClaudeHistoryReader(source).scan(project)
+    assert result.sessions == ()
+    assert [(item.kind, item.session) for item in result.diagnostics if item.kind == "active"] == [
+        ("active", SessionKey("claude-code", SESSION))
+    ]

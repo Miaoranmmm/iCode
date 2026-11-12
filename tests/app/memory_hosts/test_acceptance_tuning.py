@@ -49,6 +49,7 @@ def test_corrupt_tuning_hook_warns_once_and_continues_with_v0(
         diagnostic: TextIO,
         pid: int | None = None,
         tuning: MemoryTuning = V0,
+        auto_extract_profile: str | None = None,
     ) -> None:
         seen.append(tuning)
 
@@ -56,7 +57,7 @@ def test_corrupt_tuning_hook_warns_once_and_continues_with_v0(
     monkeypatch.setattr(hook, "get_platform", lambda: Platform(tmp_path))
     monkeypatch.setattr(hook, "handle_hook", handle)
     monkeypatch.setattr(hook.sys, "stdin", io.TextIOWrapper(io.BytesIO(b'{"hook_event_name":"unsupported"}')))
-    assert hook.main(process_tree=Tree()) == 0
+    assert hook.main([], process_tree=Tree()) == 0
     assert seen == [V0]
     captured = capsys.readouterr()
     assert captured.out == ""

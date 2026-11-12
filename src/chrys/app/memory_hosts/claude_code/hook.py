@@ -4,11 +4,13 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import os
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import BinaryIO, TextIO
 
 from chrys.app.memory_hosts.claude_code.conversation import catalog_visibility
@@ -68,6 +70,7 @@ async def handle_hook(
     diagnostic: TextIO,
     pid: int | None = None,
     tuning: MemoryTuning = V0,
+    auto_extract_profile: str | None = None,
 ) -> None:
     """Handle one input; the CLI boundary converts failures to short diagnostics."""
     event = payload.get("hook_event_name")
@@ -129,11 +132,39 @@ async def handle_hook(
         output.flush()
     await asyncio.to_thread(registry.write_delivery, key, DeliveryState(session_id, text, ever_nonempty))
     await asyncio.to_thread(registry.clear_redeliver, key, session_id)
+    if event == "UserPromptSubmit" and project is not None and auto_extract_profile is not None:
+        try:
+            from chrys.app.memory_hosts.claude_code.auto_extract import maybe_start
+
+            await asyncio.to_thread(
+                maybe_start, registry.root, Path(transcript_path).parent, Path(project_dir), auto_extract_profile
+            )
+        except Exception:
+            diagnostic.write("Memory auto-extraction could not start.\n")
 
 
-def main(*, process_tree: ProcessTree | None = None) -> int:
+def auto_extract_profile(argv: Sequence[str] | None) -> str | None:
+    """A bad hook argument only turns automatic extraction off.
+
+    argparse would exit 2, and Claude Code treats exit 2 from UserPromptSubmit
+    as blocking the user's prompt.
+    """
+    parser = argparse.ArgumentParser(add_help=False, exit_on_error=False)
+    parser.add_argument("--auto-extract-profile")
+    try:
+        args, unknown = parser.parse_known_args(argv)
+    except argparse.ArgumentError:
+        args, unknown = None, ["invalid"]
+    if args is None or unknown or args.auto_extract_profile == "":
+        sys.stderr.write("Memory hook arguments are invalid; automatic extraction is off.\n")
+        return None
+    return args.auto_extract_profile
+
+
+def main(argv: Sequence[str] | None = None, *, process_tree: ProcessTree | None = None) -> int:
     """Run a real hook process; captured failures always let the host continue."""
     try:
+        profile = auto_extract_profile(argv)
         payload = read_input(sys.stdin.buffer)
         bootstrap_runtime(configure_stdio=True, apply_patches=False, setup_telemetry=False, project_root=None)
         if payload is None:
@@ -156,6 +187,7 @@ def main(*, process_tree: ProcessTree | None = None) -> int:
                 output=sys.stdout,
                 diagnostic=sys.stderr,
                 tuning=tuning,
+                auto_extract_profile=profile,
             )
         )
     except Exception:

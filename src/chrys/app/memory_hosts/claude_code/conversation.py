@@ -30,6 +30,10 @@ MAX_LINE_BYTES = 16 * 1024 * 1024
 STOP_WINDOW_BYTES = 8 * 1024 * 1024
 STOP_MAX_RECORDS = 10_000
 STOP_BUDGET_SECONDS = 0.100
+# Claude Code dispatches an MCP call before its tool_use record reaches the
+# transcript (measured ~110 ms on 2.1.317), so an absent anchor is waited for.
+ANCHOR_WAIT_SECONDS = 2.0
+ANCHOR_POLL_SECONDS = 0.02
 SEGMENT_TOO_LARGE = (
     "Current transcript segment exceeds the 128 MiB memory-verification limit. "
     "Compact or start a new session; read/search remain available."
@@ -42,6 +46,12 @@ class Clock(Protocol):
     """The monotonic clock used for Stop's soft parsing budget."""
 
     def monotonic(self) -> float: ...
+
+
+class AnchorClock(Clock, Protocol):
+    """The clock an anchor wait reads and sleeps on."""
+
+    def sleep(self, seconds: float) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,6 +193,17 @@ def _scan(registration: Registration, tool_use_id: str, *, retain: bool) -> _Seg
     return segment
 
 
+def _scan_anchor(registration: Registration, tool_use_id: str, *, retain: bool, clock: AnchorClock | None) -> _Segment:
+    """Rescan until this call's record is written; only absence is waited out, never a refusal."""
+    timer = clock or time
+    deadline = timer.monotonic() + ANCHOR_WAIT_SECONDS
+    while True:
+        segment = _scan(registration, tool_use_id, retain=retain)
+        if segment.anchor_ids or segment.bad or segment.oversized or timer.monotonic() >= deadline:
+            return segment
+        timer.sleep(ANCHOR_POLL_SECONDS)
+
+
 def _anchor(segment: _Segment, registration: Registration, tool_use_id: str) -> str:
     if segment.oversized:
         raise _source_error(SEGMENT_TOO_LARGE)
@@ -207,9 +228,9 @@ def _anchor(segment: _Segment, registration: Registration, tool_use_id: str) -> 
     return uuid
 
 
-def validate_anchor(registration: Registration, tool_use_id: str) -> None:
+def validate_anchor(registration: Registration, tool_use_id: str, *, clock: AnchorClock | None = None) -> None:
     """Validate this call's source without constructing or limiting a write view."""
-    _anchor(_scan(registration, tool_use_id, retain=False), registration, tool_use_id)
+    _anchor(_scan_anchor(registration, tool_use_id, retain=False, clock=clock), registration, tool_use_id)
 
 
 def _chain(nodes: dict[str, _Node], tail: str) -> list[_Node]:
@@ -415,9 +436,11 @@ def _collect_sources(segment: _Segment, anchor: str, session: str) -> tuple[Sour
     return collect_sources(records, selected, session, cutoff=cutoff).messages
 
 
-def build_conversation(registration: Registration, tool_use_id: str) -> ConversationView:
+def build_conversation(
+    registration: Registration, tool_use_id: str, *, clock: AnchorClock | None = None
+) -> ConversationView:
     """Build original sources strictly before this call in the active segment."""
-    segment = _scan(registration, tool_use_id, retain=True)
+    segment = _scan_anchor(registration, tool_use_id, retain=True, clock=clock)
     anchor = _anchor(segment, registration, tool_use_id)
     try:
         messages = _collect_sources(segment, anchor, registration.session_id)

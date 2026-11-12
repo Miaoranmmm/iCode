@@ -27,12 +27,18 @@ CODEX_INSTRUCTIONS = (
     "call memory_catalog before relying on saved memories. Read relevant entries with memory_read. "
     "Saving and deleting memories are unavailable here; use Claude Code for changes."
 )
-CLAUDE_INSTRUCTIONS = (
+_CLAUDE_READING = (
     "The hook supplies the memory catalog. Call memory_catalog if you need a fresh listing, "
     "and memory_read before relying on an entry."
 )
+# Where Claude Code's own auto-memory is turned off, this sentence is the only
+# place the model learns where a remembered item goes.
+CLAUDE_INSTRUCTIONS = (
+    _CLAUDE_READING + " When the user asks you to remember something or states a lasting preference or "
+    "decision, save it with memory_save, quoting their exact words."
+)
 CLAUDE_READ_ONLY_INSTRUCTIONS = (
-    CLAUDE_INSTRUCTIONS + " This Claude Code connection is configured read-only. Saving and deleting are "
+    _CLAUDE_READING + " This Claude Code connection is configured read-only. Saving and deleting are "
     "unavailable until the write-verification checks pass."
 )
 

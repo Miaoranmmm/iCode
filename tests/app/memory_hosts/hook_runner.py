@@ -6,8 +6,10 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
+from types import ModuleType
 from typing import BinaryIO, NoReturn
 
 from chrys.app.memory_hosts.claude_code import hook
@@ -60,12 +62,49 @@ def bootstrap_failure_after_observed_input(report_path: Path) -> int:
         raise RuntimeError("private bootstrap details must not be shown")
 
     hook.bootstrap_runtime = fail_bootstrap
-    status = main(process_tree=Tree())
+    status = main([], process_tree=Tree())
     report_path.write_text(json.dumps({"bytes_read": observed.bytes_read, "eof": observed.eof}), encoding="utf-8")
     return status
+
+
+def observe_auto_child(report_path: Path) -> None:
+    """Report the real detached child's PID while the test holds its run lock."""
+    from chrys.app.memory_hosts.claude_code import auto_extract
+
+    def launch(
+        args: list[str],
+        *,
+        stdin: int,
+        stdout: BinaryIO,
+        stderr: BinaryIO,
+        env: dict[str, str],
+        start_new_session: bool = False,
+        creationflags: int = 0,
+    ) -> subprocess.Popen[bytes]:
+        child = subprocess.Popen(
+            args,
+            stdin=stdin,
+            stdout=stdout,
+            stderr=stderr,
+            env=env,
+            start_new_session=start_new_session,
+            creationflags=creationflags,
+        )
+        report_path.write_text(str(child.pid), encoding="utf-8")
+        return child
+
+    shadow = ModuleType("subprocess")
+    shadow.__dict__.update(vars(subprocess))
+    shadow.Popen = launch
+    auto_extract.subprocess = shadow
 
 
 if __name__ == "__main__":
     if "--bootstrap-failure" in sys.argv:
         raise SystemExit(bootstrap_failure_after_observed_input(Path(sys.argv[-1])))
-    raise SystemExit(main(process_tree=MissingTree() if "--no-host" in sys.argv else Tree()))
+    args = [arg for arg in sys.argv[1:] if arg != "--no-host"]
+    if "--child-report" in args:
+        index = args.index("--child-report")
+        observe_auto_child(Path(args[index + 1]))
+        del args[index : index + 2]
+    raise SystemExit(main(args, process_tree=MissingTree() if "--no-host" in sys.argv else Tree()))

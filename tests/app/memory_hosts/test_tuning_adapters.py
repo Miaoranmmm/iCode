@@ -93,7 +93,7 @@ def test_hook_main_loads_exactly_one_startup_snapshot(tmp_path: Path, monkeypatc
     monkeypatch.setattr(hook, "get_platform", lambda: Platform(tmp_path))
     monkeypatch.setattr(hook, "bootstrap_runtime", bootstrap)
     monkeypatch.setattr(hook.sys, "stdin", io.TextIOWrapper(io.BytesIO(b'{"hook_event_name":"unsupported"}')))
-    assert hook.main(process_tree=Tree()) == 0
+    assert hook.main([], process_tree=Tree()) == 0
     assert startup.calls == [tmp_path]
 
 
@@ -125,7 +125,9 @@ async def test_mcp_catalog_and_instructions_use_the_selected_tuning(tmp_path: Pa
     selected = mcp_server.create_server(store, "read-write", context, tuning=candidate)
     assert (
         selected.instructions
-        == "The hook supplies the memory catalog. Call memory_catalog if you need a fresh listing."
+        == "The hook supplies the memory catalog. Call memory_catalog if you need a fresh listing. When the user "
+        "asks you to remember something or states a lasting preference or decision, save it with memory_save, "
+        "quoting their exact words."
     )
     result = await mcp_server.MemoryTools(store, "read-write", context, tuning=candidate).call(
         "memory_catalog", {}, None

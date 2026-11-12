@@ -28,6 +28,7 @@ _STANDALONE_ENTRYPOINT_PATHS = frozenset(
         Path("src/chrys/app/memory_hosts/tuning.py"),
         Path("src/chrys/app/memory_hosts/metrics.py"),
         Path("src/chrys/app/memory_hosts/extraction_compare.py"),
+        Path("src/chrys/app/memory_hosts/auto_memory_export.py"),
     }
 )
 

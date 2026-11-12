@@ -305,7 +305,9 @@ class ClaudeHistoryReader:
         replay: bool = False,
     ) -> None:
         self.source = source
-        self.holder = holder or NativeClaudeHolder(Path.home() / ".claude" / "sessions")
+        # A source is <claude config>/projects/<key>; its live-process registrations sit
+        # beside projects/, even when HOME points elsewhere (an isolated memory store).
+        self.holder = holder or NativeClaudeHolder(source.parent.parent / "sessions")
         self.sessions = sessions
         self.replay = replay
         self.paths: dict[SessionKey, Path] = {}

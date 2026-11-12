@@ -306,6 +306,60 @@ def test_no_id_or_wrong_file_never_guesses_latest_call(tmp_path: Path, tool_id: 
         validate_anchor(registration, tool_id)
 
 
+@dataclass
+class AnchorClock:
+    """Fake time: each sleep advances the clock and may let the host write its record."""
+
+    now: float = 0.0
+    sleeps: int = 0
+    write: Path | None = None
+    record: JsonObject | None = None
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps += 1
+        self.now += seconds
+        if self.write is not None and self.record is not None:
+            with self.write.open("ab") as handle:
+                handle.write((json.dumps(self.record) + "\n").encode("utf-8"))
+            self.record = None
+
+
+@pytest.fixture
+def anchor_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(conversation, "ANCHOR_WAIT_SECONDS", 1.0)
+    monkeypatch.setattr(conversation, "ANCHOR_POLL_SECONDS", 0.25)
+
+
+@pytest.mark.usefixtures("anchor_wait")
+def test_call_record_written_after_dispatch_is_waited_for(tmp_path: Path) -> None:
+    registration = transcript(tmp_path, [user("u", "Original words")])
+    clock = AnchorClock(write=Path(registration.transcript_path), record=assistant("a", "u"))
+    view = build_conversation(registration, "call-current", clock=clock)
+    assert clock.sleeps == 1
+    assert [message.fragments for message in view.messages] == [("Original words",)]
+
+
+@pytest.mark.usefixtures("anchor_wait")
+def test_call_record_never_written_fails_after_the_wait(tmp_path: Path) -> None:
+    registration = transcript(tmp_path, [user("u", "Original words")])
+    clock = AnchorClock()
+    with pytest.raises(MemoryOperationError):
+        validate_anchor(registration, "call-current", clock=clock)
+    assert (clock.sleeps, clock.now) == (4, 1.0)
+
+
+@pytest.mark.usefixtures("anchor_wait")
+def test_refused_anchor_is_not_waited_out(tmp_path: Path) -> None:
+    registration = transcript(tmp_path, [user("u", "Original words"), assistant("a", "u", forkedFrom={"x": 1})])
+    clock = AnchorClock()
+    with pytest.raises(MemoryOperationError):
+        validate_anchor(registration, "call-current", clock=clock)
+    assert clock.sleeps == 0
+
+
 @pytest.mark.parametrize("preserved", [[], [1], "old-call", None])
 def test_unknown_compact_preservation_shape_rejects_calls(tmp_path: Path, preserved: object) -> None:
     compact = boundary(preserved=preserved)
