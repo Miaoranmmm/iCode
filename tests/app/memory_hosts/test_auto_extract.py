@@ -69,6 +69,13 @@ class Launcher:
             raise OSError("Private launch details")
 
 
+@pytest.fixture(autouse=True)
+def isolated_codex_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
+
+
 @pytest.fixture
 def launcher(monkeypatch: pytest.MonkeyPatch) -> Launcher:
     launcher = Launcher()
@@ -268,7 +275,7 @@ def test_two_concurrent_claims_start_once(tmp_path: Path, launcher: Launcher, cl
 
     def claim() -> None:
         barrier.wait(timeout=ENGINE_TURN_TIMEOUT)
-        auto_extract.maybe_start(tmp_path / "memory", tmp_path / "source", tmp_path, "X")
+        auto_extract.maybe_start(tmp_path / "memory", tmp_path / "source", tmp_path, "X", "project-id")
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         futures = [pool.submit(claim), pool.submit(claim)]
@@ -417,3 +424,199 @@ def test_cli_passes_batch_cap_and_bootstraps_once(
     assert len(seen) == 1 and seen[0].batch_cap == 3
     assert seen[0].claude_source == tmp_path / "source" and seen[0].codex_source is None
     assert (tmp_path / "memory" / "auto-extract").exists() is automatic
+
+
+@pytest.fixture
+def codex_source() -> Path:
+    source = Path(os.environ["CODEX_HOME"]) / "sessions"
+    source.mkdir(parents=True)
+    return source
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Codex automatic extraction is POSIX-only")
+def test_codex_claim_argv_key_log_and_worktree_cooldown(
+    tmp_path: Path, codex_source: Path, launcher: Launcher, clock: Clock
+) -> None:
+    import hashlib
+
+    root = tmp_path / "memory"
+    claude_source = tmp_path / "claude"
+    first = tmp_path / "worktree-a"
+    auto_extract.maybe_start(root, claude_source, first, "X", "same-project")
+    assert launcher.calls == [
+        [
+            sys.executable,
+            "-m",
+            "chrys.app.memory_hosts.extract",
+            "-C",
+            str(first),
+            "--claude-source",
+            str(claude_source),
+            "--model-profile",
+            "X",
+            "--batch-cap",
+            "8",
+            "--auto-extract-lock",
+        ],
+        [
+            sys.executable,
+            "-m",
+            "chrys.app.memory_hosts.extract",
+            "-C",
+            str(first),
+            "--codex-source",
+            str(codex_source),
+            "--model-profile",
+            "X",
+            "--batch-cap",
+            "8",
+            "--auto-extract-lock",
+        ],
+    ]
+    claude_key = os.path.normcase(str(claude_source.resolve()))
+    codex_key = f"codex|{os.path.normcase(str(codex_source.resolve()))}|same-project"
+    assert json.loads((root / "auto-extract" / "state.json").read_text(encoding="utf-8")) == {
+        claude_key: clock.now,
+        codex_key: clock.now,
+    }
+    expected_logs = {hashlib.sha256(os.fsencode(key)).hexdigest() + ".log" for key in (claude_key, codex_key)}
+    assert {path.name for path in (root / "auto-extract" / "logs").iterdir()} == expected_logs
+    clock.now += auto_extract.INTERVAL_SECONDS - 1
+    auto_extract.maybe_start(root, tmp_path / "other-claude", tmp_path / "worktree-b", "X", "same-project")
+    assert len([args for args in launcher.calls if "--codex-source" in args]) == 1
+    clock.now += 1
+    auto_extract.maybe_start(root, claude_source, first, "X", "same-project")
+    assert len([args for args in launcher.calls if "--codex-source" in args]) == 2
+    auto_extract.maybe_start(root, claude_source, first, "X", "other-project")
+    assert len([args for args in launcher.calls if "--codex-source" in args]) == 3
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Codex automatic extraction is POSIX-only")
+@pytest.mark.parametrize("failed_host", ["claude", "codex"])
+def test_one_launch_failure_does_not_block_other_claim_or_hook_output(
+    harness: Harness,
+    codex_source: Path,
+    launcher: Launcher,
+    clock: Clock,
+    monkeypatch: pytest.MonkeyPatch,
+    failed_host: str,
+) -> None:
+    baseline = invoke(harness, profile=None)
+    original = launcher.__call__
+
+    def launch(
+        args: list[str],
+        *,
+        stdin: int,
+        stdout: BinaryIO,
+        stderr: BinaryIO,
+        env: dict[str, str],
+        start_new_session: bool | None = None,
+        creationflags: int = 0,
+    ) -> None:
+        original(
+            args,
+            stdin=stdin,
+            stdout=stdout,
+            stderr=stderr,
+            env=env,
+            start_new_session=start_new_session,
+            creationflags=creationflags,
+        )
+        if f"--{failed_host}-source" in args:
+            raise OSError("Private failure")
+
+    monkeypatch.setattr(auto_extract.subprocess, "Popen", launch)
+    assert invoke(harness) == baseline
+    assert len(launcher.calls) == 2
+    saved = state(harness)
+    assert len(saved) == 1
+    assert next(iter(saved)).startswith("codex|") is (failed_host == "claude")
+    assert harness.diagnostic.getvalue() == "Memory auto-extraction could not start.\n"
+    monkeypatch.setattr(auto_extract.subprocess, "Popen", launcher)
+    invoke(harness)
+    assert len(launcher.calls) == 3 and len(state(harness)) == 2
+    assert f"--{failed_host}-source" in launcher.calls[-1]
+
+
+@pytest.mark.parametrize("reason", ["missing", "file", "win32"])
+def test_codex_ineligible_only_claims_claude(
+    tmp_path: Path,
+    launcher: Launcher,
+    clock: Clock,
+    monkeypatch: pytest.MonkeyPatch,
+    reason: str,
+) -> None:
+    source = Path(os.environ["CODEX_HOME"]) / "sessions"
+    if reason == "file":
+        source.parent.mkdir(parents=True)
+        plant_owner_only_bytes(source, b"")
+    elif reason == "win32":
+        source.mkdir(parents=True)
+        shadow = ModuleType("sys")
+        shadow.__dict__.update(vars(sys))
+        shadow.platform = "win32"
+        monkeypatch.setattr(auto_extract, "sys", shadow)
+        # Use a shadow launcher so this probe runs on POSIX without Windows constants.
+        process = ModuleType("subprocess")
+        process.__dict__.update(vars(subprocess))
+        process.DETACHED_PROCESS = 8
+        process.CREATE_NEW_PROCESS_GROUP = 512
+
+        def launch(args, *, stdin, stdout, stderr, env, creationflags):
+            launcher.calls.append(args)
+            assert creationflags == 520
+
+        process.Popen = launch
+        monkeypatch.setattr(auto_extract, "subprocess", process)
+    auto_extract.maybe_start(tmp_path / "memory", tmp_path / "claude", tmp_path, "X", "project")
+    assert len(launcher.calls) == 1 and "--claude-source" in launcher.calls[0]
+    saved = json.loads((tmp_path / "memory" / "auto-extract" / "state.json").read_text(encoding="utf-8"))
+    assert list(saved) == [os.path.normcase(str((tmp_path / "claude").resolve()))]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Codex automatic extraction is POSIX-only")
+@pytest.mark.parametrize("codex_home", ["", "unset"])
+def test_codex_default_home_and_hook_passes_bound_project_id(
+    harness: Harness,
+    launcher: Launcher,
+    clock: Clock,
+    monkeypatch: pytest.MonkeyPatch,
+    codex_home: str,
+) -> None:
+    home_source = Path.home() / ".codex" / "sessions"
+    home_source.mkdir(parents=True)
+    if codex_home == "unset":
+        monkeypatch.delenv("CODEX_HOME")
+    else:
+        monkeypatch.setenv("CODEX_HOME", "")
+    invoke(harness)
+    assert len(launcher.calls) == 2 and str(home_source) in launcher.calls[1]
+    from chrys.service.memory.project import bind_project
+
+    project = bind_project(harness.environ["CLAUDE_PROJECT_DIR"])
+    assert f"codex|{os.path.normcase(str(home_source.resolve()))}|{project.project_id}" in state(harness)
+
+
+def test_eligible_codex_still_requires_opt_in(harness: Harness, codex_source: Path, launcher: Launcher) -> None:
+    invoke(harness, profile=None)
+    assert launcher.calls == []
+    assert not (harness.registry.root / "auto-extract").exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Codex automatic extraction is POSIX-only")
+def test_concurrent_prompts_claim_both_hosts_once(
+    tmp_path: Path, codex_source: Path, launcher: Launcher, clock: Clock
+) -> None:
+    barrier = threading.Barrier(2)
+
+    def claim() -> None:
+        barrier.wait(timeout=ENGINE_TURN_TIMEOUT)
+        auto_extract.maybe_start(tmp_path / "memory", tmp_path / "claude", tmp_path, "X", "project")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(claim), pool.submit(claim)]
+        for future in futures:
+            future.result(timeout=ENGINE_TURN_TIMEOUT)
+    assert len(launcher.calls) == 2
+    assert sum("--codex-source" in args for args in launcher.calls) == 1

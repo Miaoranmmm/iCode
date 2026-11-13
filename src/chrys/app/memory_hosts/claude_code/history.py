@@ -9,13 +9,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID
 
-from chrys.app.memory_hosts.history import HistoryError, HistorySnapshot, JsonObject, object_value, read_snapshot
+from chrys.app.memory_hosts.history import (
+    HistoryError,
+    HistorySnapshot,
+    JsonObject,
+    object_value,
+    read_content,
+    read_snapshot,
+)
 from chrys.service.memory.extraction import (
     ScanDiagnostic,
     ScanResult,
     SessionKey,
     SourceAnnotation,
-    SourceRevision,
     SourceSession,
 )
 from chrys.service.memory.project import bind_project
@@ -311,7 +317,6 @@ class ClaudeHistoryReader:
         self.sessions = sessions
         self.replay = replay
         self.paths: dict[SessionKey, Path] = {}
-        self.revisions: dict[SessionKey, SourceRevision] = {}
 
     async def scan(self, project: MemoryScope) -> ScanResult:
         return await asyncio.to_thread(self._scan, project, None)
@@ -355,7 +360,6 @@ class ClaudeHistoryReader:
                 continue
             try:
                 snapshot = read_snapshot(path)
-                self.revisions[key] = snapshot.revision
                 if any(_main(record) and record.get("type") in {"user", "assistant"} for _, record in snapshot.records):
                     dialogue_files += 1
                 source, notes = decode_claude_history(snapshot, session, project)
@@ -413,19 +417,19 @@ class ClaudeHistoryReader:
             diagnostics.append(ScanDiagnostic("no_session_files"))
         return ScanResult(tuple(sessions), tuple(diagnostics), fatal)
 
-    async def revalidate(self, source: SourceSession) -> str | None:
-        return await asyncio.to_thread(self._revalidate, source)
+    async def revalidate(self, source: SourceSession, *, require_idle: bool) -> str | None:
+        return await asyncio.to_thread(self._revalidate, source, require_idle=require_idle)
 
-    def _revalidate(self, source: SourceSession) -> str | None:
+    def _revalidate(self, source: SourceSession, *, require_idle: bool) -> str | None:
         path = self.paths.get(source.key)
         if path is None:
             return "source_unavailable"
-        if not self.replay and self.holder.check(source.key.session) != "inactive":
+        if require_idle and not self.replay and self.holder.check(source.key.session) != "inactive":
             return "source_reopened"
         try:
-            revision = read_snapshot(path).revision
+            revision = read_content(path).revision
         except HistoryError as error:
             return error.kind
-        if revision != self.revisions.get(source.key):
+        if revision.sha256 != source.revision.sha256:
             return "source_changed"
         return None

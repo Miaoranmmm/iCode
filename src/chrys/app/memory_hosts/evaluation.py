@@ -16,7 +16,14 @@ from chrys.app.memory_hosts.claude_code.chain import InvalidChain
 from chrys.app.memory_hosts.claude_code.conversation import _main
 from chrys.app.memory_hosts.claude_code.sources import OccurrenceGraph, SourceRecord, blocks
 from chrys.app.memory_hosts.codex_history import _ROOT_FIELDS
-from chrys.app.memory_hosts.history import HistoryError, JsonObject, object_value, read_snapshot
+from chrys.app.memory_hosts.history import (
+    HistoryError,
+    JsonObject,
+    discover_rollouts,
+    object_value,
+    read_rollout_snapshot,
+    read_snapshot,
+)
 from chrys.foundation.platform.files import secure_open_regular_binary
 from chrys.service.memory.change_log import ChangeOperation, MemoryChange
 from chrys.service.memory.extraction import SessionKey
@@ -320,10 +327,14 @@ def _scan_usage(project: MemoryScope, claude_source: Path | None, codex_source: 
     for host, source in (("claude-code", claude_source), ("codex", codex_source)):
         if source is None:
             continue
-        paths = sorted(source.glob("*.jsonl") if host == "claude-code" else source.rglob("*.jsonl"))
+        try:
+            paths = sorted(source.glob("*.jsonl")) if host == "claude-code" else discover_rollouts(source)
+        except OSError:
+            diagnostics.append(EvaluationDiagnostic("source_unavailable", source.name))
+            continue
         for path in paths:
             try:
-                snapshot = read_snapshot(path)
+                snapshot = read_snapshot(path) if host == "claude-code" else read_rollout_snapshot(path)
                 if host == "claude-code":
                     UUID(path.stem)
                     session = path.stem

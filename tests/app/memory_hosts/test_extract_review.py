@@ -59,7 +59,7 @@ class Reader:
     async def read_files(self, project: MemoryScope, paths: tuple[Path, ...]) -> ScanResult:
         return await self.scan(project)
 
-    async def revalidate(self, source: SourceSession) -> str | None:
+    async def revalidate(self, source: SourceSession, *, require_idle: bool) -> str | None:
         return None
 
 
@@ -128,10 +128,10 @@ async def test_second_batch_pre_admission_cancellation_never_rewrites_the_first_
             raise OperationNotAdmitted()
         return original_prepare(store, project, members)
 
-    def revalidate(reader: Reader, source: SourceSession) -> Coroutine[Any, Any, str | None]:
+    def revalidate(reader: Reader, source: SourceSession, *, require_idle: bool) -> Coroutine[Any, Any, str | None]:
         if first_committed and action == "revalidate":
             raise OperationNotAdmitted()
-        return original_revalidate(reader, source)
+        return original_revalidate(reader, source, require_idle=require_idle)
 
     monkeypatch.setattr(WatermarkStore, "succeed", succeed)
     monkeypatch.setattr(MemoryReader, "catalog", catalog)
@@ -262,7 +262,7 @@ async def test_absorbed_cancellation_cannot_escape_through_a_normal_return(
         return False if mode == "already_running" else await acquire(lock)
 
     class GatedReader(Reader):
-        async def revalidate(self, source: SourceSession) -> str | None:
+        async def revalidate(self, source: SourceSession, *, require_idle: bool) -> str | None:
             entered.set()
             await release.wait()
             return "active"
@@ -474,7 +474,7 @@ async def test_replay_sticky_cancellation_does_not_admit_another_model_or_report
     calls_at_gate = 1 if point == "before_second_model" else 2
 
     class GatedReader(Reader):
-        async def revalidate(self, source: SourceSession) -> str | None:
+        async def revalidate(self, source: SourceSession, *, require_idle: bool) -> str | None:
             if source.key == sources[0].key and len(runner.batches) == calls_at_gate:
                 entered.set()
                 await release.wait()

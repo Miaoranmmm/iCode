@@ -59,7 +59,7 @@ class Reader:
     async def read_files(self, project: MemoryScope, paths: tuple[Path, ...]) -> ScanResult:
         return await self.scan(project)
 
-    async def revalidate(self, source: SourceSession) -> str | None:
+    async def revalidate(self, source: SourceSession, *, require_idle: bool) -> str | None:
         values = self.checks.get(source.key, [])
         return values.pop(0) if values else None
 
@@ -290,11 +290,11 @@ async def test_run_and_batch_signals_count_only_selected_candidates(
     assert len(runner.batches) == (0 if dry_run else 2)
 
 
-async def test_source_reopened_after_model_preserves_attempt_and_blocks_success(
+async def test_source_changed_after_model_preserves_attempt_and_blocks_success(
     workspace: tuple[ExtractionOptions, tuple[SourceSession, ...]],
 ) -> None:
     options, sources = workspace
-    reader = Reader(sources, {sources[0].key: [None, "active"]})
+    reader = Reader(sources, {sources[0].key: [None, "source_changed"]})
     report = await run_extraction(options, PROFILE, readers={"claude-code": reader}, executor=Executor(result()))
     assert (report.status, report.exit_code) == ("failed", 1)
     record = (await WatermarkStore(options.memory_dir).load()).record(
@@ -392,3 +392,28 @@ def test_cli_rejects_invalid_limits_and_unisolated_replay_before_bootstrap(args:
     with pytest.raises(SystemExit) as error:
         extract.main(["-C", str(tmp_path), *args])
     assert error.value.code == 2
+
+
+async def test_rebuilt_batch_checks_idle_again_without_recording_attempts(
+    workspace: tuple[ExtractionOptions, tuple[SourceSession, ...]],
+) -> None:
+    options, sources = workspace
+    phases: list[bool] = []
+
+    class AdmissionReader(Reader):
+        async def revalidate(self, source: SourceSession, *, require_idle: bool) -> str | None:
+            phases.append(require_idle)
+            return await super().revalidate(source, require_idle=require_idle)
+
+    reader = AdmissionReader(
+        sources,
+        {sources[0].key: ["source_reopened"], sources[1].key: [None, "source_reopened"]},
+    )
+    runner = Executor(result())
+    report = await run_extraction(options, PROFILE, readers={"claude-code": reader}, executor=runner)
+    assert report.exit_code == 0 and runner.batches == []
+    assert phases == [True, True, True]
+    snapshot = await WatermarkStore(options.memory_dir).load()
+    for source in sources:
+        record = snapshot.record(str(source.project.project_id), source.key)
+        assert (record.updated, record.attempted_updated, record.attempts) == (None, None, 0)

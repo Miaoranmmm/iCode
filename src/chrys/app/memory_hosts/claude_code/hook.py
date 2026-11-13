@@ -137,7 +137,12 @@ async def handle_hook(
             from chrys.app.memory_hosts.claude_code.auto_extract import maybe_start
 
             await asyncio.to_thread(
-                maybe_start, registry.root, Path(transcript_path).parent, Path(project_dir), auto_extract_profile
+                maybe_start,
+                registry.root,
+                Path(transcript_path).parent,
+                Path(project_dir),
+                auto_extract_profile,
+                str(project.project_id),
             )
         except Exception:
             diagnostic.write("Memory auto-extraction could not start.\n")

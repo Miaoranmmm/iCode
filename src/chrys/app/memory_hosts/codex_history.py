@@ -10,16 +10,26 @@ import ntpath
 import os
 import re
 import sys
+import time
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 
 from chrys.app.memory_hosts.claude_code.conversation import _utc_timestamp
 from chrys.app.memory_hosts.claude_code.holder import Activity
 from chrys.app.memory_hosts.claude_code.sources import arguments, result_fragments
-from chrys.app.memory_hosts.history import HistoryError, HistorySnapshot, object_value, read_snapshot
-from chrys.service.memory.extraction import ScanDiagnostic, ScanResult, SessionKey, SourceRevision, SourceSession
+from chrys.app.memory_hosts.history import (
+    HistoryError,
+    HistorySnapshot,
+    canonical_rollout_path,
+    discover_rollouts,
+    object_value,
+    read_rollout_content,
+    read_rollout_snapshot,
+)
+from chrys.foundation.platform.files import secure_open_regular_binary
+from chrys.service.memory.extraction import ScanDiagnostic, ScanResult, SessionKey, SourceSession
 from chrys.service.memory.names import is_memory_tool
 from chrys.service.memory.project import bind_project
 from chrys.service.memory.related_refs import call_refs, result_refs
@@ -27,6 +37,98 @@ from chrys.service.memory.storage.store import MemoryOperationError, MemoryScope
 from chrys.service.memory.verification import SourceKind, SourceMessage
 
 _TAIL_UUID = re.compile(r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$")
+_ROLLOUT_NAME = re.compile(
+    r"rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-"
+    r"(?P<thread>[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
+    r"(?:_(?P<rollout>[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}))?\.jsonl"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class RolloutIdentity:
+    """Preserve the tail session key while distinguishing Codex's thread grammar."""
+
+    session: str
+    thread: str | None
+    reverted: bool = False
+
+    @property
+    def valid_name(self) -> bool:
+        return self.thread is not None
+
+
+def rollout_identity(path: Path) -> RolloutIdentity | None:
+    """Parse the complete grammar first, retaining legacy tail identities on failure."""
+    plain = canonical_rollout_path(path)
+    if name := _ROLLOUT_NAME.fullmatch(plain.name):
+        rollout = name["rollout"]
+        return RolloutIdentity(rollout or name["thread"], name["thread"], rollout is not None)
+    if tail := _TAIL_UUID.search(plain.stem):
+        return RolloutIdentity(tail[1], None)
+    return None
+
+
+def _reverted_threads(paths: tuple[Path, ...]) -> set[str]:
+    """Any alternate rollout excludes the thread's entire immutable history."""
+    return {
+        identity.thread
+        for path in paths
+        if (identity := rollout_identity(path)) is not None and identity.reverted and identity.thread is not None
+    }
+
+
+_HOME_SOURCES = ("sessions", "archived_sessions")
+
+
+def _home_reverted_threads(source: Path, paths: tuple[Path, ...]) -> set[str]:
+    """Archiving moves a thread's rollouts one by one, so revert evidence spans one Codex home."""
+    reverted = _reverted_threads(paths)
+    if source.name in _HOME_SOURCES:
+        for name in _HOME_SOURCES:
+            sibling = source.parent / name
+            if name != source.name and sibling.is_dir():
+                reverted |= _reverted_threads(discover_rollouts(sibling))
+    return reverted
+
+
+def _writer_lock_directory(source: Path) -> Path | None:
+    if sys.platform == "win32" or source.name not in _HOME_SOURCES:
+        return None
+    directory = source.parent / "thread-writer-locks"
+    return directory if (directory / ".coordination.lock").exists() else None
+
+
+def _thread_activity(directory: Path, thread: str) -> Activity | Literal["coordination_timeout"]:
+    """Follow Codex publication locking without creating or removing any host file."""
+    if sys.platform == "win32":
+        return "unknown"
+    import fcntl
+
+    try:
+        with secure_open_regular_binary(directory / ".coordination.lock") as coordination:
+            deadline = time.monotonic() + 1.0
+            while True:
+                try:
+                    fcntl.flock(coordination.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return "coordination_timeout"
+                    time.sleep(min(0.05, remaining))
+            try:
+                with secure_open_regular_binary(directory / f"{thread}.lock") as handle:
+                    try:
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        return "active"
+            except FileNotFoundError:
+                return "inactive"
+        return "inactive"
+    except OSError:
+        return "unknown"
+
+
 _ROOT_FIELDS = (
     "parent_thread_id",
     "forked_from_id",
@@ -338,7 +440,7 @@ def decode_codex_history(
 
 
 class CodexHistoryReader:
-    """Read recursive rollout snapshots only after every same-user Codex host exits."""
+    """Read idle Codex rollouts using native writer locks where available."""
 
     def __init__(
         self,
@@ -353,7 +455,6 @@ class CodexHistoryReader:
         self.sessions = sessions
         self.replay = replay
         self.paths: dict[SessionKey, Path] = {}
-        self.revisions: dict[SessionKey, SourceRevision] = {}
 
     async def scan(self, project: MemoryScope) -> ScanResult:
         return await asyncio.to_thread(self._scan, project, None)
@@ -362,62 +463,105 @@ class CodexHistoryReader:
         return await asyncio.to_thread(self._scan, project, paths)
 
     def _scan(self, project: MemoryScope, explicit: tuple[Path, ...] | None) -> ScanResult:
-        if not self.replay:
+        locks = None if self.replay else _writer_lock_directory(self.source)
+        if not self.replay and locks is None:
             activity = self.processes.check()
             if activity != "inactive":
                 return ScanResult(diagnostics=(ScanDiagnostic("codex_hosts_" + activity),), fatal=True)
         try:
             paths = (
-                explicit
+                tuple(sorted({canonical_rollout_path(path) for path in explicit}))
                 if explicit is not None
-                else tuple(sorted(self.source.rglob("*.jsonl")))
+                else discover_rollouts(self.source)
                 if self.source.is_dir()
                 else ()
             )
+            if not paths:
+                return ScanResult(diagnostics=(ScanDiagnostic("no_session_files"),), fatal=True)
+            reverted_threads = set() if self.replay else _home_reverted_threads(self.source, paths)
         except OSError:
             return ScanResult(diagnostics=(ScanDiagnostic("source_unavailable"),), fatal=True)
-        if not paths:
-            return ScanResult(diagnostics=(ScanDiagnostic("no_session_files"),), fatal=True)
         sessions: list[SourceSession] = []
         diagnostics: list[ScanDiagnostic] = [ScanDiagnostic("source_files", count=len(paths))]
-        recognized_files = 0
+        recognized = False
+        named_files = 0
+        format_unrecognized = False
+        coordination_timed_out = False
         for path in paths:
-            match = _TAIL_UUID.search(path.stem)
-            if match is None:
+            identity = rollout_identity(path)
+            if identity is None:
                 diagnostics.append(ScanDiagnostic("unknown_format", details=(("file", path.name),)))
                 continue
-            recognized_files += 1
-            session = match[1]
+            recognized = True
+            named_files += identity.valid_name
+            format_unrecognized |= not identity.valid_name
+            session = identity.session
+            thread = identity.thread
             if self.sessions and session not in self.sessions:
                 continue
             key = SessionKey("codex", session)
             self.paths[key] = path
+            if thread in reverted_threads:
+                diagnostics.append(ScanDiagnostic("rollout_reverted", key))
+                continue
+            if locks is not None:
+                if not identity.valid_name:
+                    diagnostics.append(ScanDiagnostic("unknown_format", key))
+                    continue
+                probe = (
+                    _thread_activity(locks, thread) if not coordination_timed_out and thread is not None else "unknown"
+                )
+                if probe == "coordination_timeout":
+                    # A stalled coordinator must cost at most one wait per scan.
+                    coordination_timed_out = True
+                    probe = "unknown"
+                if probe != "inactive":
+                    diagnostics.append(ScanDiagnostic(probe, key))
+                    continue
             try:
-                snapshot = read_snapshot(path)
-                self.revisions[key] = snapshot.revision
+                snapshot = read_rollout_snapshot(path)
                 source, notes = decode_codex_history(snapshot, session, project)
                 diagnostics.extend(notes)
                 if source is not None:
                     sessions.append(source)
             except HistoryError as error:
                 diagnostics.append(ScanDiagnostic(error.kind, key, details=error.details))
-        if not recognized_files:
+        if not recognized:
             diagnostics.append(ScanDiagnostic("no_session_files"))
-        return ScanResult(tuple(sessions), tuple(diagnostics), not recognized_files)
+        if locks is not None and format_unrecognized:
+            diagnostics.append(ScanDiagnostic("codex_format_unrecognized"))
+        return ScanResult(
+            tuple(sessions), tuple(diagnostics), not recognized or (locks is not None and not named_files)
+        )
 
-    async def revalidate(self, source: SourceSession) -> str | None:
-        return await asyncio.to_thread(self._revalidate, source)
+    async def revalidate(self, source: SourceSession, *, require_idle: bool) -> str | None:
+        return await asyncio.to_thread(self._revalidate, source, require_idle=require_idle)
 
-    def _revalidate(self, source: SourceSession) -> str | None:
+    def _revalidate(self, source: SourceSession, *, require_idle: bool) -> str | None:
         path = self.paths.get(source.key)
         if path is None:
             return "source_unavailable"
-        if not self.replay and self.processes.check() != "inactive":
-            return "codex_hosts_reopened"
+        identity = rollout_identity(path)
+        thread = None if identity is None else identity.thread
+        if not self.replay:
+            try:
+                listed = discover_rollouts(self.source) if self.source.is_dir() else ()
+                reverted_threads = _home_reverted_threads(self.source, listed)
+            except OSError:
+                return "source_unavailable"
+            if thread in reverted_threads:
+                return "rollout_reverted"
+        if require_idle and not self.replay:
+            locks = _writer_lock_directory(self.source)
+            if locks is None:
+                if self.processes.check() != "inactive":
+                    return "codex_hosts_reopened"
+            elif thread is None or _thread_activity(locks, thread) != "inactive":
+                return "source_reopened"
         try:
-            revision = read_snapshot(path).revision
+            revision = read_rollout_content(path).revision
         except HistoryError as error:
             return error.kind
-        if revision != self.revisions.get(source.key):
+        if revision.sha256 != source.revision.sha256:
             return "source_changed"
         return None

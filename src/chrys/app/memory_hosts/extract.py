@@ -80,7 +80,9 @@ class HistoryReader(Protocol):
 
     async def read_files(self, project: MemoryScope, paths: tuple[Path, ...]) -> ScanResult: ...
 
-    async def revalidate(self, source: SourceSession) -> str | None: ...
+    async def revalidate(self, source: SourceSession, *, require_idle: bool) -> str | None:
+        """Return why ``source`` is no longer usable: admission (``require_idle``) also skips busy sessions."""
+        ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -583,7 +585,7 @@ async def run_extraction(
             invalid: set[SessionKey] = set()
             phase = "revalidation"
             for source in batch.sources:
-                reason = await owner.run(active_readers[source.key.host].revalidate(source))
+                reason = await owner.run(active_readers[source.key.host].revalidate(source, require_idle=True))
                 if reason:
                     invalid.add(source.key)
                     report.diagnostics.append({"kind": reason, "host": source.key.host, "session": source.key.session})
@@ -601,7 +603,7 @@ async def run_extraction(
                 # Revalidation of the rebuilt batch is necessary before admission.
                 validated: list[SourceSession] = []
                 for source in batch.sources:
-                    reason = await owner.run(active_readers[source.key.host].revalidate(source))
+                    reason = await owner.run(active_readers[source.key.host].revalidate(source, require_idle=True))
                     if reason:
                         report.diagnostics.append(
                             {"kind": reason, "host": source.key.host, "session": source.key.session}
@@ -677,7 +679,7 @@ async def run_extraction(
             changed = False
             phase = "revalidation"
             for source in batch.sources:
-                reason = await owner.run(active_readers[source.key.host].revalidate(source))
+                reason = await owner.run(active_readers[source.key.host].revalidate(source, require_idle=False))
                 if reason:
                     changed = True
                     report.diagnostics.append({"kind": reason, "host": source.key.host, "session": source.key.session})

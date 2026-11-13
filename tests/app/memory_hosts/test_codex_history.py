@@ -253,9 +253,10 @@ async def test_reader_extracts_tail_uuid_recursively_and_revalidates_source(tmp_
     result = await reader.scan(project)
     assert result.fatal is False and len(result.sessions) == 1
     assert result.sessions[0].key.session == SESSION
-    assert await reader.revalidate(result.sessions[0]) is None
+    assert await reader.revalidate(result.sessions[0], require_idle=False) is None
     processes.activity = "active"
-    assert await reader.revalidate(result.sessions[0]) == "codex_hosts_reopened"
+    assert await reader.revalidate(result.sessions[0], require_idle=True) == "codex_hosts_reopened"
+    assert await reader.revalidate(result.sessions[0], require_idle=False) is None
 
 
 @pytest.mark.parametrize("activity", ["active", "unknown"])
@@ -267,12 +268,12 @@ async def test_any_live_or_unknown_codex_host_rejects_entire_scan(tmp_path: Path
 
 
 async def test_replay_uses_only_explicit_snapshot_and_never_checks_current_hosts(tmp_path: Path) -> None:
-    path = tmp_path / f"rollout-frozen-{SESSION}.jsonl"
+    path = tmp_path / f"{SESSION}.jsonl"
     write_jsonl(path, [meta(tmp_path), message("Frozen words")])
     processes = FixedCodex("active")
     reader = CodexHistoryReader(tmp_path / "missing-live-directory", processes=processes, replay=True)
     result = await reader.read_files(await asyncio.to_thread(bind_project, str(tmp_path)), (path,))
     assert len(result.sessions) == 1 and processes.calls == 0
-    assert await reader.revalidate(result.sessions[0]) is None and processes.calls == 0
+    assert await reader.revalidate(result.sessions[0], require_idle=True) is None and processes.calls == 0
     write_jsonl(path, [meta(tmp_path), message("Changed snapshot")])
-    assert await reader.revalidate(result.sessions[0]) == "source_changed"
+    assert await reader.revalidate(result.sessions[0], require_idle=False) == "source_changed"

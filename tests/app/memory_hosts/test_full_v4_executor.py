@@ -55,7 +55,7 @@ class FixedReader:
         assert project == self.source.project
         return ScanResult((self.source,))
 
-    async def revalidate(self, source: SourceSession) -> str | None:
+    async def revalidate(self, source: SourceSession, *, require_idle: bool) -> str | None:
         assert source.key == self.source.key and source.revision == self.source.revision
         return None
 

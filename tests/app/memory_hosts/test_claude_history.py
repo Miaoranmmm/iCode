@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -382,7 +383,7 @@ async def test_all_copy_scan_is_fatal_and_does_not_write_any_host_state(tmp_path
     assert sorted(item.name for item in tmp_path.iterdir()) == [path.name]
 
 
-async def test_revalidation_checks_original_snapshot_and_holder_and_replay_bypasses_only_holder(tmp_path: Path) -> None:
+async def test_revalidation_checks_content_even_when_holder_becomes_active(tmp_path: Path) -> None:
     path = tmp_path / f"{SESSION}.jsonl"
     project = await asyncio.to_thread(bind_project, str(tmp_path))
     write_jsonl(path, [claude_user("u", "Words", cwd=str(tmp_path))])
@@ -390,14 +391,23 @@ async def test_revalidation_checks_original_snapshot_and_holder_and_replay_bypas
     reader = ClaudeHistoryReader(tmp_path, holder=holder)
     source = (await reader.scan(project)).sessions[0]
     assert source.key == SessionKey("claude-code", SESSION)
-    assert await reader.revalidate(source) is None
+    assert await reader.revalidate(source, require_idle=False) is None
     holder.activity = "active"
-    assert await reader.revalidate(source) == "source_reopened"
+    calls = holder.calls
+    assert await reader.revalidate(source, require_idle=False) is None
+    assert holder.calls == calls
+    assert await reader.revalidate(source, require_idle=True) == "source_reopened"
+    info = path.stat()
+    os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns + 1))
+    assert await reader.revalidate(source, require_idle=False) is None
     replay = ClaudeHistoryReader(tmp_path, holder=holder, replay=True)
     source = (await replay.read_files(project, (path,))).sessions[0]
-    assert await replay.revalidate(replace(source, revision=SourceRevision(1, source.revision.sha256))) is None
+    assert (
+        await replay.revalidate(replace(source, revision=SourceRevision(1, source.revision.sha256)), require_idle=True)
+        is None
+    )
     write_jsonl(path, [claude_user("u", "Changed words")])
-    assert await replay.revalidate(source) == "source_changed"
+    assert await replay.revalidate(source, require_idle=False) == "source_changed"
 
 
 @pytest.mark.parametrize(

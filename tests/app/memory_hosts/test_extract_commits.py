@@ -46,7 +46,7 @@ class Reader:
     async def read_files(self, project: MemoryScope, paths: tuple[Path, ...]) -> ScanResult:
         return await self.scan(project)
 
-    async def revalidate(self, source: SourceSession) -> str | None:
+    async def revalidate(self, source: SourceSession, *, require_idle: bool) -> str | None:
         assert source == self.source
         return None
 

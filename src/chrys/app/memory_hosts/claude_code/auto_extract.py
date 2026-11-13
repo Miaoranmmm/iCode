@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Directory cooldown claims and detached, globally serialized Claude extraction."""
+"""Directory cooldown claims and detached, globally serialized host extraction."""
 
 from __future__ import annotations
 
@@ -62,8 +62,46 @@ def _state(path: Path) -> dict[str, float]:
         return {}
 
 
-def maybe_start(memory_root: Path, source_dir: Path, project_dir: Path, selector: str) -> None:
-    """Claim one source directory only after a detached process successfully starts."""
+def _launch(root: Path, key: str, host: str, source_dir: Path, project_dir: Path, selector: str) -> None:
+    logs = root / "logs"
+    _directory(logs)
+    digest = hashlib.sha256(os.fsencode(key)).hexdigest()
+    handle = secure_open_owner_only_append(logs / f"{digest}.log")
+    with os.fdopen(handle.fd, "wb") as log:
+        os.ftruncate(log.fileno(), 0)
+        env = os.environ.copy()
+        env["PYTHONUTF8"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
+        kwargs: dict[str, Any] = {}
+        if sys.platform == "win32":
+            kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            kwargs["start_new_session"] = True
+        subprocess.Popen(  # noqa: S603 - fixed interpreter/module; paths and selector are separate argv entries.
+            [
+                sys.executable,
+                "-m",
+                "chrys.app.memory_hosts.extract",
+                "-C",
+                str(project_dir),
+                f"--{host}-source",
+                str(source_dir),
+                "--model-profile",
+                selector,
+                "--batch-cap",
+                str(BATCH_CAP),
+                "--auto-extract-lock",
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=log,
+            env=env,
+            **kwargs,
+        )
+
+
+def maybe_start(memory_root: Path, source_dir: Path, project_dir: Path, selector: str, project_id: str) -> None:
+    """Process independent Claude and Codex claims under the same state lock."""
     root = memory_root / "auto-extract"
     _directory(root)
     lock = _lock(root / "state.lock", STATE_LOCK_TIMEOUT_SECONDS)
@@ -73,48 +111,28 @@ def maybe_start(memory_root: Path, source_dir: Path, project_dir: Path, selector
         return
     try:
         source = os.path.normcase(str(source_dir.resolve()))
+        claims = [(source, "claude", source_dir)]
+        if sys.platform != "win32":
+            codex_home = os.environ.get("CODEX_HOME")
+            codex_source = (Path(codex_home) if codex_home else Path.home() / ".codex") / "sessions"
+            if codex_source.is_dir():
+                normalized = os.path.normcase(str(codex_source.resolve()))
+                claims.append((f"codex|{normalized}|{project_id}", "codex", codex_source))
         state = _state(root / "state.json")
-        now = time.time()
-        previous = state.get(source)
-        if previous is not None and 0 <= now - previous < INTERVAL_SECONDS:
-            return
-        logs = root / "logs"
-        _directory(logs)
-        digest = hashlib.sha256(os.fsencode(source)).hexdigest()
-        handle = secure_open_owner_only_append(logs / f"{digest}.log")
-        with os.fdopen(handle.fd, "wb") as log:
-            os.ftruncate(log.fileno(), 0)
-            env = os.environ.copy()
-            env["PYTHONUTF8"] = "1"
-            env["PYTHONIOENCODING"] = "utf-8"
-            kwargs: dict[str, Any] = {}
-            if sys.platform == "win32":
-                kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
-            else:
-                kwargs["start_new_session"] = True
-            subprocess.Popen(  # noqa: S603 - fixed interpreter/module; paths and selector are separate argv entries.
-                [
-                    sys.executable,
-                    "-m",
-                    "chrys.app.memory_hosts.extract",
-                    "-C",
-                    str(project_dir),
-                    "--claude-source",
-                    str(source_dir),
-                    "--model-profile",
-                    selector,
-                    "--batch-cap",
-                    str(BATCH_CAP),
-                    "--auto-extract-lock",
-                ],
-                stdin=subprocess.DEVNULL,
-                stdout=log,
-                stderr=log,
-                env=env,
-                **kwargs,
-            )
-        state[source] = time.time()
-        atomic_write_owner_only_bytes(root / "state.json", json.dumps(state, ensure_ascii=True).encode("utf-8"))
+        error: Exception | None = None
+        for key, host, directory in claims:
+            previous = state.get(key)
+            if previous is not None and 0 <= time.time() - previous < INTERVAL_SECONDS:
+                continue
+            try:
+                _launch(root, key, host, directory, project_dir, selector)
+                state[key] = time.time()
+                atomic_write_owner_only_bytes(root / "state.json", json.dumps(state, ensure_ascii=True).encode("utf-8"))
+            except Exception as failure:
+                # A failed host must not prevent admission of the other host.
+                error = error or failure
+        if error is not None:
+            raise error
     finally:
         lock.release()
 

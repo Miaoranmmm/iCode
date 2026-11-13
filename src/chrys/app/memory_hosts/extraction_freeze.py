@@ -18,7 +18,7 @@ from pathlib import Path
 import yaml
 
 from chrys.app.memory_hosts.extraction_replay import FrozenSource, _state_file, load_manifest, text_digest
-from chrys.app.memory_hosts.history import MAX_HISTORY_BYTES, object_value
+from chrys.app.memory_hosts.history import HistoryError, object_value, read_content, read_rollout_content
 from chrys.foundation.platform import get_platform
 from chrys.foundation.platform.files import (
     _rename_file_no_replace,
@@ -127,13 +127,12 @@ def _put(root: Path, relative: Path, payload: bytes) -> None:
 
 def _read_source(source: FrozenSource) -> bytes:
     try:
-        with secure_open_regular_binary(source.path) as handle:
-            payload = handle.read(MAX_HISTORY_BYTES + 1)
-    except OSError:
-        raise ExtractionError("source_unavailable", "A planned source could not be copied.") from None
-    if len(payload) > MAX_HISTORY_BYTES or hashlib.sha256(payload).hexdigest() != source.sha256:
+        content = read_rollout_content(source.path) if source.key.host == "codex" else read_content(source.path)
+    except HistoryError as error:
+        raise ExtractionError(error.kind, "A planned source could not be copied.") from None
+    if content.revision.sha256 != source.sha256:
         raise ExtractionError("source_changed", "A planned source changed after its snapshot was read.")
-    return payload
+    return content.payload
 
 
 def _baseline_kind(payload: bytes) -> str | None:
