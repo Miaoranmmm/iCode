@@ -5130,6 +5130,9 @@
       "FileMemoryStore.merge": [
         ["wrapper", "await _run(lambda: self._merge(scope, keep_name, keep_ref, keep_version, drop_name, drop_ref, drop_version, keep_draft))", "unresolved", "chrys.service.memory.storage.file_store._run"]
       ],
+      "FileMemoryStore.read_version_bytes": [
+        ["wrapper", "await _run(read)", "unresolved", "chrys.service.memory.storage.file_store._run"]
+      ],
       "FileMemoryStore.search": [
         ["wrapper", "await _run(scan_all)", "unresolved", "chrys.service.memory.storage.file_store._run"]
       ],

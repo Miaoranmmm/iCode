@@ -32,7 +32,7 @@ from typing import Any, Final
 
 import yaml
 
-from chrys.foundation.platform.files import atomic_write_owner_only_bytes
+from chrys.foundation.platform.files import atomic_write_owner_only_bytes, secure_open_regular_binary
 from chrys.foundation.util.lock import FileLock
 from chrys.service.memory.storage.layout import scope_directory
 from chrys.service.memory.storage.store import (
@@ -119,6 +119,17 @@ class FileMemoryStore:
     async def get(self, scope: MemoryScope, ref: str) -> StoredMemory:
         name = _ref_name(scope, ref)
         return await _run(lambda: _read_stored(self._scope_dir(scope) / f"{name}{_ENTRY_SUFFIX}", scope.scope, ref))
+
+    async def read_version_bytes(self, scope: MemoryScope, ref: str, version: str) -> bytes:
+        """Return the exact original bytes only while their stored version matches."""
+        name = _ref_name(scope, ref)
+
+        def read() -> bytes:
+            data = _read_bytes(self._scope_dir(scope) / f"{name}{_ENTRY_SUFFIX}", ref, limit=MAX_ENTRY_BYTES)
+            _check_version(ref, _version(data), version)
+            return data
+
+        return await _run(read)
 
     async def search(
         self, scope: MemoryScope, query: str, cursor: str | None = None, *, with_global: bool = False
@@ -384,9 +395,15 @@ def _require_directory(directory: Path, ref: str) -> None:
         raise MemoryOperationError("memory_store_unavailable", "The memory store could not be read or written.")
 
 
-def _read_bytes(path: Path, ref: str) -> bytes:
+def _read_bytes(path: Path, ref: str, *, limit: int | None = None) -> bytes:
     try:
-        return path.read_bytes()
+        if limit is None:
+            return path.read_bytes()
+        with secure_open_regular_binary(path) as handle:
+            data = handle.read(limit + 1)
+        if len(data) > limit:
+            raise MemoryOperationError("memory_entry_invalid", f"{ref} is over {limit // 1024} KiB.")
+        return data
     except FileNotFoundError as exc:
         raise MemoryInputRejected("memory_not_found", f"No memory entry {ref}.") from exc
 

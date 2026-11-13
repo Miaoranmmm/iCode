@@ -324,11 +324,16 @@ def _shorten(field: _Field, entry: _EntryText, tokenizer: MixedLanguageTokenizer
 
 
 def render_entry(stored: StoredMemory) -> str:
+    """Read a memory within the whole-output budget."""
+    return render_entry_with_completeness(stored)[0]
+
+
+def render_entry_with_completeness(stored: StoredMemory) -> tuple[str, bool]:
     """Read a memory with round-trippable quotes and a hard whole-output budget."""
     entry = _EntryText(stored)
     tokenizer = MixedLanguageTokenizer()
     if tokenizer.count_token_units(entry.render()) <= _READ_BUDGET:
-        return entry.render()
+        return entry.render(), not entry.truncated
     entry.truncated = True
     sources = [*reversed(entry.evidence)]
     if entry.context is not None:
@@ -340,15 +345,15 @@ def render_entry(stored: StoredMemory) -> str:
         for field in source.fields:
             _shorten(field, entry, tokenizer)
             if tokenizer.count_token_units(entry.render()) <= _READ_BUDGET:
-                return entry.render()
+                return entry.render(), not entry.truncated
         source.omitted = True
         if tokenizer.count_token_units(entry.render()) <= _READ_BUDGET:
-            return entry.render()
+            return entry.render(), not entry.truncated
     for field in [entry.body, *([entry.applies] if entry.applies is not None else []), entry.title]:
         _shorten(field, entry, tokenizer)
         if tokenizer.count_token_units(entry.render()) <= _READ_BUDGET:
-            return entry.render()
-    return entry.render()
+            return entry.render(), not entry.truncated
+    return entry.render(), not entry.truncated
 
 
 def _search_fields(entry: MemoryEntry) -> list[str]:

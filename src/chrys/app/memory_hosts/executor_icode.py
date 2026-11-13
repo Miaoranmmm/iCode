@@ -488,14 +488,19 @@ class ExtractionGuard(ChatMiddleware):
         self.fail(kind)
         raise ExtractionStopped("failed")
 
+    def _check_cancelled(self) -> None:
+        current = asyncio.current_task()
+        if self.owner.cancel_requested or (current is not None and current.cancelling()):
+            self.owner.cancel_requested = True
+            self.termination, self.stop_reason = "cancelled", "cancelled"
+            raise ExtractionStopped("cancelled")
+
     async def process(self, context: ChatContext, call_next: Callable[[], Awaitable[None]]) -> None:
         nested = context.kwargs.get("client_kwargs")
         tail = isinstance(nested, Mapping) and nested.get(EXHAUSTION_TAIL_KWARG) is True
         if tail:
             self.tail_seen = True
-        if self.owner.cancel_requested:
-            self.termination, self.stop_reason = "cancelled", "cancelled"
-            raise ExtractionStopped("cancelled")
+        self._check_cancelled()
         observed = _observe_calls(self, context.messages)
         if self.failures or (self.stop_on_hard_failure and observed.has_hard_failures):
             await self.owner.drain()
@@ -514,6 +519,7 @@ class ExtractionGuard(ChatMiddleware):
             raise ExtractionStopped(self.termination)
         self.requests += 1
         await call_next()
+        self._check_cancelled()
         response = context.result
         if not isinstance(response, ChatResponse):
             self._reject("invalid_response")
@@ -595,9 +601,6 @@ class ICodeExecutor:
             tool_names=self.material_profile.tool_names,
             stop_on_hard_failure=self.material_profile.allow_input_rejections,
         )
-        usage = RawUsage()
-        recorder = LoopRecorder()
-        messages: Sequence[Message] | None = None
         reader = MemoryReader(
             self.store,
             batch.project,
@@ -614,27 +617,8 @@ class ICodeExecutor:
             allow_created_rewrites=self.material_profile.allow_created_rewrites,
         )
         tools = self._tools(reader, writer, batch, owner, guard)
-        # The factory hands this stack to exactly one close owner before any
-        # further await. Cleanup drains full operations before closing it.
-        try:
-            client = await create_client(self.profile)
-        except asyncio.CancelledError:
-            owner.cancel_requested = True
-            guard.termination, guard.stop_reason = "cancelled", "cancelled"
-            return _settle(guard, usage, owner, ())
-        except Exception:
-            guard.fail("client_build_error")
-            return _settle(guard, usage, owner, ())
 
-        async def cleanup() -> None:
-            await owner.drain()
-            await client.aclose()
-
-        close = OnceClose(cleanup)
-        try:
-            if not isinstance(client, ToolLoopLayer):
-                raise MemoryOperationError("memory_invalid_input", "Extraction requires the factory tool-loop stack.")
-            client.max_iterations = self.max_turns
+        async def prepare_prompt() -> str:
             catalog = render_catalog(await owner.run(reader.catalog()), tuning=self.tuning) or _EMPTY_CATALOG
             review = (
                 (await owner.run(load_review_snapshot(self.store, batch.project))).lists(
@@ -643,7 +627,7 @@ class ICodeExecutor:
                 if self.material_profile.tool_schema == "engineering"
                 else None
             )
-            prompt = render_prompt(
+            return render_prompt(
                 batch,
                 catalog,
                 self.references,
@@ -651,54 +635,17 @@ class ICodeExecutor:
                 related_entries=review.related_entries if review is not None else "",
                 withdrawn_entries=review.withdrawn_entries if review is not None else "",
             )
-            agent = Agent(
-                client,
-                instructions=self.material_profile.instructions,
-                tools=tools,
-                context_providers=[],
-                middleware=[ResponseValidationMiddleware(), guard, usage],
-            )
-            try:
-                timeout = asyncio.timeout(self.timeout_seconds)
-                async with timeout:
-                    response = await agent.run(
-                        prompt,
-                        stream=False,
-                        session=None,
-                        options=effective_chat_options(self.profile),
-                        client_kwargs={"loop_recorder": recorder},
-                    )
-                messages = response.messages
-                if timeout.expired():
-                    guard.fail("timeout")
-            except ExtractionStopped:
-                if timeout.expired():
-                    guard.fail("timeout")
-            except TimeoutError:
-                guard.fail("timeout")
-            except asyncio.CancelledError:
-                owner.cancel_requested = True
-                guard.termination, guard.stop_reason = "cancelled", "cancelled"
-            except Exception:
-                guard.fail("client_or_validation_error")
-        except OperationNotAdmitted:
-            owner.cancel_requested = True
-            guard.termination, guard.stop_reason = "cancelled", "cancelled"
-        except asyncio.CancelledError:
-            owner.cancel_requested = True
-            guard.termination, guard.stop_reason = "cancelled", "cancelled"
-        except Exception:
-            guard.fail("executor_setup_error")
-        finally:
-            try:
-                await close()
-            except asyncio.CancelledError:
-                owner.cancel_requested = True
-            except Exception:
-                guard.fail("client_close_error")
-        if messages is None:
-            messages = recorder.loop_messages or ()
-        return _settle(guard, usage, owner, messages)
+
+        return await run_agent(
+            self.profile,
+            owner,
+            guard,
+            tools,
+            prepare_prompt,
+            instructions=self.material_profile.instructions,
+            max_turns=self.max_turns,
+            timeout_seconds=self.timeout_seconds,
+        )
 
     async def _note_conflict(self, request: NoteConflictRequest) -> str:
         for ref in (request.ref_a, request.ref_b):
@@ -813,6 +760,94 @@ class ICodeExecutor:
         ]
 
 
+async def run_agent(
+    profile: ModelProfile,
+    owner: OperationOwner,
+    guard: ExtractionGuard,
+    tools: list[FunctionTool],
+    prepare_prompt: Callable[[], Awaitable[str]],
+    *,
+    instructions: str,
+    max_turns: int,
+    timeout_seconds: float,
+    allow_zero_calls: bool = False,
+) -> ExtractionResult:
+    """Own one client, guarded tool loop, timeout, drain and final settlement."""
+    usage = RawUsage()
+    recorder = LoopRecorder()
+    messages: Sequence[Message] | None = None
+    # The factory hands this stack to exactly one close owner before any
+    # further await. Cleanup drains full operations before closing it.
+    try:
+        client = await create_client(profile)
+    except asyncio.CancelledError:
+        owner.cancel_requested = True
+        guard.termination, guard.stop_reason = "cancelled", "cancelled"
+        return _settle(guard, usage, owner, (), allow_zero_calls=allow_zero_calls)
+    except Exception:
+        guard.fail("client_build_error")
+        return _settle(guard, usage, owner, (), allow_zero_calls=allow_zero_calls)
+
+    async def cleanup() -> None:
+        await owner.drain()
+        await client.aclose()
+
+    close = OnceClose(cleanup)
+    try:
+        if not isinstance(client, ToolLoopLayer):
+            raise MemoryOperationError("memory_invalid_input", "Extraction requires the factory tool-loop stack.")
+        client.max_iterations = max_turns
+        prompt = await prepare_prompt()
+        agent = Agent(
+            client,
+            instructions=instructions,
+            tools=tools,
+            context_providers=[],
+            middleware=[ResponseValidationMiddleware(), guard, usage],
+        )
+        try:
+            timeout = asyncio.timeout(timeout_seconds)
+            async with timeout:
+                response = await agent.run(
+                    prompt,
+                    stream=False,
+                    session=None,
+                    options=effective_chat_options(profile),
+                    client_kwargs={"loop_recorder": recorder},
+                )
+            messages = response.messages
+            if timeout.expired():
+                guard.fail("timeout")
+        except ExtractionStopped:
+            if timeout.expired():
+                guard.fail("timeout")
+        except TimeoutError:
+            guard.fail("timeout")
+        except asyncio.CancelledError:
+            owner.cancel_requested = True
+            guard.termination, guard.stop_reason = "cancelled", "cancelled"
+        except Exception:
+            guard.fail("client_or_validation_error")
+    except OperationNotAdmitted:
+        owner.cancel_requested = True
+        guard.termination, guard.stop_reason = "cancelled", "cancelled"
+    except asyncio.CancelledError:
+        owner.cancel_requested = True
+        guard.termination, guard.stop_reason = "cancelled", "cancelled"
+    except Exception:
+        guard.fail("executor_setup_error")
+    finally:
+        try:
+            await close()
+        except asyncio.CancelledError:
+            owner.cancel_requested = True
+        except Exception:
+            guard.fail("client_close_error")
+    if messages is None:
+        messages = recorder.loop_messages or ()
+    return _settle(guard, usage, owner, messages, allow_zero_calls=allow_zero_calls)
+
+
 @dataclass(frozen=True, slots=True)
 class CallObservations:
     """One interpretation of native records and their kernel results for every decision."""
@@ -897,7 +932,12 @@ def _observe_calls(guard: ExtractionGuard, messages: Sequence[Message]) -> CallO
 
 
 def _settle(
-    guard: ExtractionGuard, usage: RawUsage, owner: OperationOwner, messages: Sequence[Message]
+    guard: ExtractionGuard,
+    usage: RawUsage,
+    owner: OperationOwner,
+    messages: Sequence[Message],
+    *,
+    allow_zero_calls: bool = False,
 ) -> ExtractionResult:
     observed = _observe_calls(guard, messages)
     records, unsettled = observed.records, observed.unsettled
@@ -923,7 +963,7 @@ def _settle(
         termination = "failed"
         if reason is None:
             reason = "unseen_call" if unsettled else "tool_failure"
-    elif termination == "completed" and not records:
+    elif termination == "completed" and not records and not allow_zero_calls:
         termination, reason, failure_count = "failed", "zero_calls", 1
         failure_kinds["guard:zero_calls"] += 1
     return ExtractionResult(

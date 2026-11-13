@@ -160,14 +160,24 @@ class MergePartialError(MemoryOperationError):
 class MemoryReader:
     """Read memories without exposing any write operation to a host."""
 
-    def __init__(self, store: MemoryStore, project: MemoryScope | None, *, project_root: Path | None = None) -> None:
+    def __init__(
+        self,
+        store: MemoryStore,
+        project: MemoryScope | None,
+        *,
+        project_root: Path | None = None,
+        check_external_basis: bool = True,
+    ) -> None:
         self._store = store
         self._project = project
         self._project_root = project_root
+        self._check_external_basis = check_external_basis
 
     async def read(self, ref: str) -> StoredMemory:
         scope = _scope_for_ref(ref, self._project)
         stored = await self._store.get(scope, ref)
+        if not self._check_external_basis:
+            return stored
         basis = await asyncio.to_thread(check_basis, stored.entry.evidence, self._project, self._project_root)
         return replace(stored, basis=basis)
 

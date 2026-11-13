@@ -68,8 +68,19 @@ def bootstrap_failure_after_observed_input(report_path: Path) -> int:
 
 
 def observe_auto_child(report_path: Path) -> None:
-    """Report the real detached child's PID while the test holds its run lock."""
+    """Give the test ownership of every detached child, indexed by its claim."""
     from chrys.app.memory_hosts.claude_code import auto_extract
+
+    children: dict[str, int] = {}
+    current_claim = ""
+    original_launch = auto_extract._launch
+
+    def observe_claim(root: Path, key: str, host: str, source: Path, project: Path, selector: str) -> None:
+        nonlocal current_claim
+        current_claim = key
+        original_launch(root, key, host, source, project, selector)
+
+    auto_extract._launch = observe_claim
 
     def launch(
         args: list[str],
@@ -90,7 +101,8 @@ def observe_auto_child(report_path: Path) -> None:
             start_new_session=start_new_session,
             creationflags=creationflags,
         )
-        report_path.write_text(str(child.pid), encoding="utf-8")
+        children[current_claim] = child.pid
+        report_path.write_text(json.dumps(children), encoding="utf-8")
         return child
 
     shadow = ModuleType("subprocess")

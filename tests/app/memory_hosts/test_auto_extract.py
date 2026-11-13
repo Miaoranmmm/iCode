@@ -18,7 +18,7 @@ from typing import BinaryIO
 
 import pytest
 
-from chrys.app.memory_hosts import extract
+from chrys.app.memory_hosts import extract, runtime_files
 from chrys.app.memory_hosts.claude_code import auto_extract, hook
 from chrys.foundation.util.lock import FileLock
 from chrys.service.memory.tuning import V0
@@ -28,6 +28,8 @@ from tests.app.memory_hosts.test_hook import KEY, Harness
 from tests.app.memory_hosts.test_hook import harness as harness
 from tests.support.secure_files import plant_owner_only_bytes
 from tests.support.waiting import ENGINE_TURN_TIMEOUT
+
+_REAL_REVIEW_DUE = auto_extract._review_due
 
 
 @dataclass
@@ -78,6 +80,8 @@ def isolated_codex_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
 
 @pytest.fixture
 def launcher(monkeypatch: pytest.MonkeyPatch) -> Launcher:
+    # Existing host-claim contracts run while review is within its separate cooldown.
+    monkeypatch.setattr(auto_extract, "_review_due", lambda root, project, launched_at: False)
     launcher = Launcher()
     shadow = ModuleType("subprocess")
     shadow.__dict__.update(vars(subprocess))
@@ -304,7 +308,7 @@ def test_global_lock_serializes_extractors(tmp_path: Path, monkeypatch: pytest.M
                 second_waiting.set()
             super().acquire()
 
-    monkeypatch.setattr(auto_extract, "FileLock", ObservedLock)
+    monkeypatch.setattr(runtime_files, "FileLock", ObservedLock)
 
     def first() -> int:
         first_started.set()
@@ -598,6 +602,26 @@ def test_codex_default_home_and_hook_passes_bound_project_id(
     assert f"codex|{os.path.normcase(str(home_source.resolve()))}|{project.project_id}" in state(harness)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Codex automatic extraction is POSIX-only")
+@pytest.mark.parametrize("live", [True, False])
+def test_archived_codex_sessions_are_their_own_claim(
+    tmp_path: Path, launcher: Launcher, clock: Clock, live: bool
+) -> None:
+    home = Path(os.environ["CODEX_HOME"])
+    archived = home / "archived_sessions"
+    archived.mkdir(parents=True)
+    sources = [home / "sessions", archived] if live else [archived]
+    if live:
+        sources[0].mkdir()
+    auto_extract.maybe_start(tmp_path / "memory", tmp_path / "claude", tmp_path, "X", "project")
+    codex_calls = [args for args in launcher.calls if "--codex-source" in args]
+    assert [args[args.index("--codex-source") + 1] for args in codex_calls] == [str(path) for path in sources]
+    saved = json.loads((tmp_path / "memory" / "auto-extract" / "state.json").read_text(encoding="utf-8"))
+    assert {key for key in saved if key.startswith("codex|")} == {
+        f"codex|{os.path.normcase(str(path.resolve()))}|project" for path in sources
+    }
+
+
 def test_eligible_codex_still_requires_opt_in(harness: Harness, codex_source: Path, launcher: Launcher) -> None:
     invoke(harness, profile=None)
     assert launcher.calls == []
@@ -620,3 +644,66 @@ def test_concurrent_prompts_claim_both_hosts_once(
             future.result(timeout=ENGINE_TURN_TIMEOUT)
     assert len(launcher.calls) == 2
     assert sum("--codex-source" in args for args in launcher.calls) == 1
+
+
+def test_review_claim_uses_success_clock_and_separate_launch_record(
+    tmp_path: Path,
+    launcher: Launcher,
+    clock: Clock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from chrys.app.memory_hosts.review_state import ReviewState, save_state
+
+    monkeypatch.setattr(auto_extract, "_review_due", _REAL_REVIEW_DUE)
+    root = tmp_path / "memory"
+    source = tmp_path / "claude"
+    project = tmp_path / "project"
+    auto_extract.maybe_start(root, source, project, "X", "id")
+    assert launcher.calls[-1] == [
+        sys.executable,
+        "-m",
+        "chrys.app.memory_hosts.review",
+        "--project",
+        str(project),
+        "--memory-dir",
+        str(root),
+        "--model-profile",
+        "X",
+        "--automatic",
+    ]
+    launch_state = json.loads((root / "auto-extract" / "state.json").read_text(encoding="utf-8"))
+    assert launch_state["review|id"] == clock.now
+    for _ in range(4):
+        auto_extract.maybe_start(root, source, project, "X", "id")
+    assert len([args for args in launcher.calls if "chrys.app.memory_hosts.review" in args]) == 1
+    clock.now += auto_extract.REVIEW_CLAIM_SECONDS
+    auto_extract.maybe_start(root, source, project, "X", "id")
+    assert len([args for args in launcher.calls if "chrys.app.memory_hosts.review" in args]) == 2
+    save_state(root, "id", ReviewState(success_at=clock.now))
+    clock.now += 24 * 60 * 60 - 1
+    auto_extract.maybe_start(root, source, project, "X", "id")
+    assert len([args for args in launcher.calls if "chrys.app.memory_hosts.review" in args]) == 2
+    clock.now += 1
+    auto_extract.maybe_start(root, source, project, "X", "id")
+    assert len([args for args in launcher.calls if "chrys.app.memory_hosts.review" in args]) == 3
+
+
+def test_paused_review_relaunches_only_once_per_interval(tmp_path, launcher, clock, monkeypatch):
+    from chrys.app.memory_hosts.review_state import ReviewState, save_state
+
+    monkeypatch.setattr(auto_extract, "_review_due", _REAL_REVIEW_DUE)
+    root = tmp_path / "memory"
+    save_state(root, "id", ReviewState(failures=3, paused=True))
+
+    def launches() -> int:
+        return len([args for args in launcher.calls if "chrys.app.memory_hosts.review" in args])
+
+    auto_extract.maybe_start(root, tmp_path / "claude", tmp_path, "X", "id")
+    assert launches() == 1
+    for _ in range(5):
+        clock.now += auto_extract.REVIEW_CLAIM_SECONDS
+        auto_extract.maybe_start(root, tmp_path / "claude", tmp_path, "X", "id")
+    assert launches() == 1
+    clock.now += auto_extract.REVIEW_INTERVAL_SECONDS
+    auto_extract.maybe_start(root, tmp_path / "claude", tmp_path, "X", "id")
+    assert launches() == 2

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import os
 import subprocess
@@ -113,6 +114,7 @@ def environment(tmp_path: Path) -> Environment:
             "USERPROFILE": str(home),
             "APPDATA": str(home),
             "XDG_CONFIG_HOME": str(home / "config"),
+            "CODEX_HOME": str(home / ".codex"),
             "CLAUDE_PROJECT_DIR": str(workspace),
             "PYTHONPATH": os.pathsep.join((str(REPO), str(REPO / "src"))),
         }
@@ -252,7 +254,18 @@ def test_real_auto_hook_exits_before_detached_extraction_and_child_is_reaped(env
     root.mkdir(parents=True, mode=0o700)
     plant_owner_only_bytes(root / "run.lock", b"")
     report = environment.workspace / "auto-child.pid"
-    child: psutil.Process | None = None
+    children: dict[str, psutil.Process] = {}
+
+    def collect_children() -> None:
+        if report.exists():
+            for claim, pid in json.loads(report.read_text(encoding="utf-8")).items():
+                if claim not in children:
+                    with contextlib.suppress(psutil.NoSuchProcess):
+                        children[claim] = psutil.Process(pid)
+
+    def log_path(claim: str) -> Path:
+        return root / "logs" / f"{hashlib.sha256(os.fsencode(claim)).hexdigest()}.log"
+
     try:
         with FileLock(root / "run.lock"):
             started = time.monotonic()
@@ -262,21 +275,23 @@ def test_real_auto_hook_exits_before_detached_extraction_and_child_is_reaped(env
                 auto_extract_profile="missing-offline-profile",
                 child_report=report,
             )
-            elapsed = time.monotonic() - started
+            collect_children()
             assert result == ChildResult(0, "", "")
-            assert elapsed < ENGINE_TURN_TIMEOUT
-            child = psutil.Process(int(report.read_text(encoding="utf-8")))
-            assert child.is_running()
-            assert not next((root / "logs").glob("*.log")).read_bytes()
-        child.wait(timeout=ENGINE_TURN_TIMEOUT)
-        assert not child.is_running()
-        log = next((root / "logs").glob("*.log")).read_text(encoding="utf-8")
-        assert "model_profile_unavailable" in log
+            assert time.monotonic() - started < ENGINE_TURN_TIMEOUT
+            assert len(children) == 2
+            extraction = next(claim for claim in children if not claim.startswith("review|"))
+            review = next(claim for claim in children if claim.startswith("review|"))
+            assert children[extraction].is_running()
+            assert not log_path(extraction).read_bytes()
+        for child in children.values():
+            child.wait(timeout=ENGINE_TURN_TIMEOUT)
+            assert not child.is_running()
+        assert "model_profile_unavailable" in log_path(extraction).read_text(encoding="utf-8")
+        assert "Memory review could not start." in log_path(review).read_text(encoding="utf-8")
         assert not (environment.root / "watermarks").exists()
     finally:
-        if child is None and report.exists():
-            with contextlib.suppress(psutil.NoSuchProcess):
-                child = psutil.Process(int(report.read_text(encoding="utf-8")))
-        if child is not None and child.is_running():
-            child.kill()
-            child.wait(timeout=ENGINE_TURN_TIMEOUT)
+        collect_children()
+        for child in children.values():
+            if child.is_running():
+                child.kill()
+                child.wait(timeout=ENGINE_TURN_TIMEOUT)

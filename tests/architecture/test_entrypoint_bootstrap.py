@@ -24,6 +24,7 @@ _STANDALONE_ENTRYPOINT_PATHS = frozenset(
         Path("src/chrys/app/memory_hosts/mcp_server.py"),
         Path("src/chrys/app/memory_hosts/claude_code/hook.py"),
         Path("src/chrys/app/memory_hosts/extract.py"),
+        Path("src/chrys/app/memory_hosts/review.py"),
         Path("src/chrys/app/memory_hosts/extraction_selection.py"),
         Path("src/chrys/app/memory_hosts/tuning.py"),
         Path("src/chrys/app/memory_hosts/metrics.py"),
