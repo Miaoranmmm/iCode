@@ -288,17 +288,16 @@ async def test_tool_boundary_and_unknown_raw_types(
 
 @pytest.mark.parametrize("arguments", [None, [], "string", {}, {"query": 42}, {"query": "", "extra": True}])
 @pytest.mark.parametrize(
-    "material_profile,calls,requests",
-    [(USER_V2, 3, 4), (FULL_V3, 3, 4), (FULL_V4, 2, 2)],
+    "material_profile,rejected",
+    [(USER_V2, False), (FULL_V3, False), (FULL_V4, True)],
     ids=["user-v2", "full-v3", "full-v4"],
 )
-async def test_kernel_prevalidation_failure_is_sticky(
+async def test_kernel_prevalidation_failure_follows_the_profile_rejection_rule(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     arguments: Any,
     material_profile: MaterialProfile,
-    calls: int,
-    requests: int,
+    rejected: bool,
 ) -> None:
     result, wire, _, _, _ = await execute(
         monkeypatch,
@@ -311,9 +310,14 @@ async def test_kernel_prevalidation_failure_is_sticky(
         ],
         material_profile=material_profile,
     )
-    assert result.termination == "failed" and result.failure_count == 1
-    assert result.failure_kinds == (("memory_search:argument_parsing", 1),)
-    assert result.call_count == calls and len(wire.requests) == requests
+    kinds = (("memory_search:argument_parsing", 1),)
+    if rejected:
+        assert (result.termination, result.failure_count, result.rejection_count) == ("completed", 0, 1)
+        assert (result.failure_kinds, result.rejection_kinds) == ((), kinds)
+    else:
+        assert (result.termination, result.failure_count, result.rejection_count) == ("failed", 1, 0)
+        assert (result.failure_kinds, result.rejection_kinds) == (kinds, ())
+    assert result.call_count == 3 and len(wire.requests) == 4
 
 
 async def test_turn_limit_prevents_extra_tail_wire_request(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -373,21 +377,16 @@ async def test_zero_calls_done_is_failure_even_with_empty_recorder(
 
 
 @pytest.mark.parametrize(
-    "material_profile,failures,stop_reason,tail_seen",
-    [
-        (USER_V2, 10, "tool_error_stop", True),
-        (FULL_V3, 10, "tool_error_stop", True),
-        (FULL_V4, 1, "tool_failure", False),
-    ],
+    "material_profile,failures,rejections",
+    [(USER_V2, 10, 0), (FULL_V3, 10, 0), (FULL_V4, 0, 10)],
     ids=["user-v2", "full-v3", "full-v4"],
 )
-async def test_kernel_exception_stop_policy_respects_profile(
+async def test_repeated_kernel_argument_errors_end_at_the_kernel_error_tail(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     material_profile: MaterialProfile,
     failures: int,
-    stop_reason: str,
-    tail_seen: bool,
+    rejections: int,
 ) -> None:
     result, wire, _, _, _ = await execute(
         monkeypatch,
@@ -395,9 +394,10 @@ async def test_kernel_exception_stop_policy_respects_profile(
         [response(call("memory_save", {})) for _ in range(10)],
         material_profile=material_profile,
     )
-    assert result.termination == "failed" and result.stop_reason == stop_reason
-    assert result.failure_count == result.call_count == len(wire.requests) == failures
-    assert result.tail_seen is tail_seen and len(wire.script) == 10 - failures
+    assert result.termination == "failed" and result.stop_reason == "tool_error_stop"
+    assert (result.failure_count, result.rejection_count) == (failures, rejections)
+    assert result.call_count == len(wire.requests) == 10
+    assert result.tail_seen is True and wire.script == []
 
 
 async def test_failure_after_save_keeps_durable_entry(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

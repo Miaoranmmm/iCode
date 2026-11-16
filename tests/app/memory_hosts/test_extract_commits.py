@@ -133,9 +133,9 @@ async def test_real_wire_search_save_read_commits_watermark_and_run_source(
         ("numeric_call_id", 1, 1),
         ("unknown_tool", 1, 1),
         ("future_raw_item", 1, 1),
-        ("missing_save_fields", 1, 1),
-        ("non_object_args", 1, 1),
-        ("wrong_type", 1, 1),
+        ("missing_save_fields", 0, 0),
+        ("non_object_args", 0, 0),
+        ("wrong_type", 0, 0),
         ("client_error", 1, 1),
         ("zero_calls", 1, 1),
         ("zero_calls_length", 2, 0),
@@ -220,7 +220,9 @@ async def test_actual_executor_outcome_controls_final_watermark(
         assert report.batches[0]["failure_count"] == 0
     if case == "prior_failure_length":
         assert report.batches[0]["call_count"] == 1
-        assert report.batches[0]["failure_count"] == 1
+        assert (report.batches[0]["failure_count"], report.batches[0]["rejection_count"]) == (0, 1)
+    if case in {"missing_save_fields", "non_object_args", "wrong_type"}:
+        assert (report.batches[0]["failure_count"], report.batches[0]["rejection_count"]) == (0, 1)
     assert await FileMemoryStore(options.memory_dir).list_entries(selected.project) == []
 
 

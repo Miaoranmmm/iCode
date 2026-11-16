@@ -335,7 +335,7 @@ class NativeReviewExecutor:
     ) -> ExtractionResult:
         owner = OperationOwner()
         guard = ExtractionGuard(
-            owner, policy.max_turns, self.prepared.wire, tool_names=policy.tool_names, stop_on_hard_failure=True
+            owner, policy.max_turns, self.prepared.wire, tool_names=policy.tool_names, allow_input_rejections=True
         )
         tools = review_tools(reader, writer, owner, guard)
 

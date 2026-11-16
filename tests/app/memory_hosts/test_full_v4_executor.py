@@ -368,9 +368,7 @@ async def test_only_limits_without_any_tool_failure_revoke_the_attempt(
     assert len(wire.requests) == (1 if limit == "turn" else 2)
 
 
-@pytest.mark.parametrize(
-    "case", ["storage", "lock", "unknown", "unmarked", "version", "corrupt", "kernel", "guard", "partial"]
-)
+@pytest.mark.parametrize("case", ["storage", "lock", "unknown", "unmarked", "version", "corrupt", "guard", "partial"])
 async def test_hard_failures_keep_progress_uncommitted_and_stop_before_another_request(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
 ) -> None:
@@ -405,8 +403,6 @@ async def test_hard_failures_keep_progress_uncommitted_and_stop_before_another_r
         path = next(configured.options.memory_dir.rglob(saved.ref.split(":")[1] + ".md"))
         await asyncio.to_thread(path.write_text, "broken entry", encoding="utf-8")
         item = call("memory_read", {"ref": saved.ref})
-    elif case == "kernel":
-        item = call("memory_read", {"ref": 7})
     elif case == "guard":
         item = call("memory_search", {"query": ""}, call_id="")
     elif case == "partial":

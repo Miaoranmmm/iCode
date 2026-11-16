@@ -489,3 +489,13 @@ async def test_native_runner_handles_timeout_and_safe_rejections(library, monkey
     assert len(await library.store.list_entries(library.scope)) == 2 and wire.closed == 1
     if rejected:
         assert report.counts["rejection_count"] == 1
+
+
+async def test_native_review_treats_kernel_argument_errors_as_rejections(library, monkeypatch):
+    await library.seed(quotes=2)
+    await library.seed(quotes=2)
+    wire = ScriptedWire([response(call("memory_read", {"ref": 7})), response(text="Done")])
+    monkeypatch.setattr(executor_icode, "create_client", ClientFactory(wire))
+    report = await run_review(library.project, library.root, PROFILE, policy=REVIEW_V1)
+    assert report.status == "completed" and len(wire.requests) == 2
+    assert (report.counts["failure_count"], report.counts["rejection_count"]) == (0, 1)

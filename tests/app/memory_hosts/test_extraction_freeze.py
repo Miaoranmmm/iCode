@@ -514,3 +514,46 @@ async def test_an_empty_plan_is_not_published_as_an_unreplayable_manifest(worksp
     )
     assert (report.status, report.exit_code) == ("freeze_empty", 1)
     assert not await asyncio.to_thread(workspace.target.exists)
+
+
+async def test_a_freeze_beyond_the_tuning_batch_cap_replays_every_frozen_batch(workspace: Workspace) -> None:
+    for index in range(1, 41):
+        session = f"60000000-0000-4000-8000-{index:012d}"
+        await asyncio.to_thread(
+            write_jsonl,
+            workspace.claude / f"{session}.jsonl",
+            [claude_user("human", "Keep names clear.", sessionId=session, cwd=str(workspace.project))],
+        )
+    options = replace(workspace.options(), codex_source=None, batch_cap=4)
+    report = await run_extraction(
+        options,
+        PROFILE,
+        readers={"claude-code": ClaudeHistoryReader(workspace.claude, holder=FixedHolder())},
+    )
+    assert (report.status, report.exit_code) == ("dry_run", 0)
+    frozen = [batch["sessions"] for batch in report.batches]
+    manifest = await asyncio.to_thread(load_manifest, workspace.target / "manifest.json")
+    # The default tuning runs three batches; the freeze and its replays must not stop there.
+    assert len(frozen) == len(manifest.batches) == 4
+    strict = await run_extraction(
+        ExtractionOptions(workspace.project, workspace.memory, replay=workspace.target / "manifest.json", dry_run=True),
+        PROFILE,
+    )
+    assert (strict.status, strict.exit_code) == ("replay_dry_run", 0)
+    assert [batch["sessions"] for batch in strict.batches] == frozen
+    candidate = workspace.root / "candidate.json"
+    await asyncio.to_thread(candidate.write_text, json.dumps({"version": "v9", "batch_cap": 1}), encoding="utf-8")
+    replay = await run_extraction(
+        ExtractionOptions(
+            workspace.project,
+            workspace.memory,
+            replay=workspace.target / "manifest.json",
+            dry_run=True,
+            tuning=str(candidate),
+        ),
+        PROFILE,
+    )
+    assert (replay.status, replay.exit_code) == ("replay_dry_run", 0)
+    assert {item["session"] for batch in replay.batches for item in batch["sessions"]} == {
+        item["session"] for batch in frozen for item in batch
+    }

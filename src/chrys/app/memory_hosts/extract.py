@@ -347,6 +347,9 @@ async def run_extraction(
         if options.tuning is not None and not options.tuning.removeprefix("v").isdecimal():
             report.tuning_version = "file:" + text_digest(json.dumps(asdict(tuning), sort_keys=True))
         report.material_changed = options.tuning is not None
+        if manifest is not None:
+            # A replay covers its whole frozen set; one source per batch bounds every plan of it.
+            tuning = replace(tuning, batch_cap=len(manifest.sources))
         strict = manifest is not None and options.tuning is None
         options = replace(
             options,
@@ -788,6 +791,7 @@ async def run_extraction(
                         codex_source=None,
                         sessions=frozenset(),
                         replay=path,
+                        batch_cap=None,
                         freeze_to=None,
                         baseline_dir=None,
                         dry_run=True,

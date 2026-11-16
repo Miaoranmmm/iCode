@@ -194,7 +194,7 @@ async def test_reasoning_only_output_limit_stops_before_visible_validation(
     [
         (USER_V2, 2, "tool_error_stop", True),
         (FULL_V3, 2, "tool_error_stop", True),
-        (FULL_V4, 1, "tool_failure", False),
+        (FULL_V4, 2, "tool_error_stop", True),
     ],
     ids=["user-v2", "full-v3", "full-v4"],
 )
@@ -216,7 +216,8 @@ async def test_prior_failure_and_turn_tail_cannot_be_clean_limit(
         max_turns=2,
         material_profile=material_profile,
     ).run(batch())
-    assert result.termination == "failed" and result.failure_count >= 1
+    assert result.termination == "failed"
+    assert (result.failure_count, result.rejection_count) == ((0, 1) if material_profile is FULL_V4 else (1, 0))
     assert result.stop_reason == stop_reason
     assert len(wire.requests) == requests and result.tail_seen is tail_seen
 

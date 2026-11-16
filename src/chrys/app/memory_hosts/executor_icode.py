@@ -125,6 +125,8 @@ _KNOWN_RAW_TOOLS = frozenset(
 _OUTCOME_KEY = "extraction_outcome"
 _RECORD_KEY = "extraction_record"
 _SAFE_FAILURE = "Error: Memory operation failed."
+# The kernel error kind for arguments that failed parsing or schema validation.
+_KERNEL_INPUT_REJECTION = "argument_parsing"
 _EMPTY_CATALOG = "No saved memories."
 _USAGE_FIELDS = (
     "input_token_count",
@@ -463,11 +465,13 @@ class ExtractionGuard(ChatMiddleware):
         wire: Wire,
         *,
         tool_names: Sequence[str] | None = None,
-        stop_on_hard_failure: bool = False,
+        allow_input_rejections: bool = False,
     ) -> None:
         self.owner = owner
         self.tool_names = frozenset(_TOOL_NAMES if tool_names is None else tool_names)
-        self.stop_on_hard_failure = stop_on_hard_failure
+        # Input rejections leave the store unchanged and let the model correct
+        # its call; any hard failure then stops the run at once.
+        self.allow_input_rejections = allow_input_rejections
         self.wire = wire
         self.max_turns = max_turns
         self.requests = 0
@@ -502,7 +506,7 @@ class ExtractionGuard(ChatMiddleware):
             self.tail_seen = True
         self._check_cancelled()
         observed = _observe_calls(self, context.messages)
-        if self.failures or (self.stop_on_hard_failure and observed.has_hard_failures):
+        if self.failures or (self.allow_input_rejections and observed.has_hard_failures):
             await self.owner.drain()
             self.termination = "failed"
             self.stop_reason = "tool_error_stop" if tail else "tool_failure"
@@ -599,7 +603,7 @@ class ICodeExecutor:
             self.max_turns,
             self.wire,
             tool_names=self.material_profile.tool_names,
-            stop_on_hard_failure=self.material_profile.allow_input_rejections,
+            allow_input_rejections=self.material_profile.allow_input_rejections,
         )
         reader = MemoryReader(
             self.store,
@@ -920,8 +924,13 @@ def _observe_calls(guard: ExtractionGuard, messages: Sequence[Message]) -> CallO
                     continue
                 if answered.exception is not None or tool_result_metadata_failure_state(failure_metadata) is True:
                     kind = failure_metadata.get(TOOL_ERROR_KIND_METADATA_KEY)
+                    # The kernel refused these arguments before the tool ran, so
+                    # nothing changed: the same input rejection as a native one.
+                    outcome = (
+                        "rejection" if guard.allow_input_rejections and kind == _KERNEL_INPUT_REJECTION else "failure"
+                    )
                     records[identity] = CallRecord(
-                        identity, content.name or "", "failure", kind if isinstance(kind, str) else "kernel_tool_error"
+                        identity, content.name or "", outcome, kind if isinstance(kind, str) else "kernel_tool_error"
                     )
                 else:
                     unsettled.add(identity)
